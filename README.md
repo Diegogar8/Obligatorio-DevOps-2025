@@ -10,7 +10,7 @@ Script para crear múltiples usuarios en Linux desde un archivo de configuració
 
 ## Requisitos
 
-- Sistema operativo Linux (desarrollado y probado en Ubuntu en WSL)
+- Sistema operativo Linux (desarrollado y probado en Ubuntu 24.04 en WSL)
 - Permisos de root (sudo)
 - Bash shell
 
