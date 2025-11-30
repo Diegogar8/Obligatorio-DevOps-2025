@@ -1249,15 +1249,35 @@ SELECT COUNT(*) AS total_empleados FROM empleados;
 
 def create_key_pair(ec2_client):
     """Crea o recupera el key pair para EC2."""
+    import os
     
     print(f"\nVerificando Key Pair: {EC2_KEY_NAME}")
     
+    # Determinar directorio de salida (mismo directorio del script)
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    key_file = os.path.join(script_dir, f"{EC2_KEY_NAME}.pem")
+    
     try:
         ec2_client.describe_key_pairs(KeyNames=[EC2_KEY_NAME])
-        print(f"   [OK] Key Pair ya existe: {EC2_KEY_NAME}")
+        print(f"   [OK] Key Pair ya existe en AWS: {EC2_KEY_NAME}")
+        if os.path.exists(key_file):
+            print(f"   [OK] Archivo local existe: {key_file}")
+        else:
+            print(f"   [!] ADVERTENCIA: El key pair existe en AWS pero no tienes el archivo .pem local")
+            print(f"   [!] Si necesitas acceso SSH, elimina el key pair de AWS y ejecuta de nuevo")
         return EC2_KEY_NAME
     except ClientError:
         pass
+    
+    # Verificar si el archivo ya existe localmente
+    if os.path.exists(key_file):
+        try:
+            os.remove(key_file)
+            print(f"   [OK] Archivo anterior eliminado: {key_file}")
+        except PermissionError:
+            print(f"   [!] No se puede eliminar archivo existente: {key_file}")
+            print(f"   [!] Ejecuta: sudo rm {key_file}")
+            raise
     
     # Crear nuevo key pair
     try:
@@ -1274,19 +1294,27 @@ def create_key_pair(ec2_client):
             ]
         )
         
-        # Guardar la clave privada
-        key_file = f"{EC2_KEY_NAME}.pem"
+        # Guardar la clave privada con permisos correctos
         with open(key_file, 'w') as f:
             f.write(response['KeyMaterial'])
         
+        # Establecer permisos 400 (solo lectura para el propietario)
+        os.chmod(key_file, 0o400)
+        
         print(f"   [OK] Key Pair creado: {EC2_KEY_NAME}")
-        print(f"   Clave privada guardada en: {key_file}")
+        print(f"   [OK] Clave privada guardada en: {key_file}")
+        print(f"   [OK] Permisos establecidos: 400 (solo lectura)")
         print(f"   [!] IMPORTANTE: Guarda este archivo de forma segura")
         
         return EC2_KEY_NAME
         
     except ClientError as e:
         print(f"   [ERROR] Error al crear Key Pair: {e}")
+        raise
+    except PermissionError as e:
+        print(f"   [ERROR] Error de permisos al guardar el archivo: {e}")
+        print(f"   [!] Intenta ejecutar el script desde tu directorio home:")
+        print(f"       cd ~ && python3 {os.path.abspath(__file__)}")
         raise
 
 
@@ -1528,3 +1556,5 @@ Password: {db_password}
 if __name__ == "__main__":
     success = main()
     sys.exit(0 if success else 1)
+
+
