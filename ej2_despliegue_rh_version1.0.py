@@ -85,6 +85,95 @@ else:
     try:
         # Crear Security Group para EC2
         sg_params = {
+            'GroupName': EC2_SG_NAME,#!/usr/bin/env python3
+
+import boto3          # SDK de AWS para Python (para usar EC2, RDS, SSM, etc.)
+import os             # Para leer variables de entorno del sistema
+import sys            # Para salir con códigos de error y escribir en stderr
+import time           # Para esperas entre reintentos de SSM
+from botocore.exceptions import ClientError  # Excepción específica de errores de AWS
+
+# ---------------------------
+# CONSTANTES DE CONFIGURACIÓN
+# ---------------------------
+REGION = 'us-east-1'                       # Región de AWS donde se desplegarán los recursos
+AMI_ID = 'ami-06b21ccaeff8cd686'           # ID de la AMI utilizada para la instancia EC2 (Amazon Linux 2023)
+INSTANCE_TYPE = 't2.micro'                 # Tipo de instancia EC2
+EC2_SG_NAME = 'rh-app-ec2-sg'              # Nombre del Security Group para EC2 (Web Server)
+RDS_SG_NAME = 'rh-app-rds-sg'              # Nombre del Security Group para RDS (Base de Datos)
+DB_INSTANCE_ID = 'rh-app-db'               # Identificador de la instancia RDS
+DB_NAME = 'demo_db'                        # Nombre de la base de datos que se creará en RDS
+DB_USER = 'admin'                          # Usuario administrador de la base de datos
+APP_NAME = 'rh-app-web'                    # Nombre que se usará como tag de la instancia EC2
+APP_USER = 'admin'                         # Usuario por defecto de la aplicación
+APP_PASS = 'admin123'                      # Contraseña por defecto de la aplicación
+IAM_INSTANCE_PROFILE = 'LabInstanceProfile' # Perfil de instancia IAM para SSM
+
+# ---------------------------
+# LECTURA DE VARIABLES DE ENTORNO
+# ---------------------------
+EC2_SG_ID_ENV = os.environ.get('EC2_SECURITY_GROUP_ID')  # Si está, se usará este Security Group para EC2
+RDS_SG_ID_ENV = os.environ.get('RDS_SECURITY_GROUP_ID')  # Si está, se usará este Security Group para RDS
+RDS_ENDPOINT_ENV = os.environ.get('RDS_ENDPOINT')        # Si está, se usará este endpoint de RDS ya existente
+RDS_PASSWORD = os.environ.get('RDS_ADMIN_PASSWORD')      # Password del usuario admin de RDS
+
+# Si no se definió la variable de entorno con la contraseña, el script no puede continuar
+if not RDS_PASSWORD:
+    print("Error: Debes definir la variable de entorno RDS_ADMIN_PASSWORD", file=sys.stderr)
+    print("Ejemplo: export RDS_ADMIN_PASSWORD='tu_password_seguro'", file=sys.stderr)
+    sys.exit(1)
+
+# ---------------------------
+# CLIENTES DE AWS (EC2, RDS y SSM)
+# ---------------------------
+ec2 = boto3.client('ec2', region_name=REGION)
+rds = boto3.client('rds', region_name=REGION)
+ssm = boto3.client('ssm', region_name=REGION)
+
+# Mensajes iniciales de log
+print("=" * 60)
+print("INICIANDO DESPLIEGUE DE APLICACIÓN DE RECURSOS HUMANOS")
+print("=" * 60)
+
+# ---------------------------
+# VPC PREDETERMINADA (CONFIGURADA MANUALMENTE)
+# ---------------------------
+DEFAULT_VPC_ID = 'vpc-033dae0e3eda2f0a9'  # VPC predeterminada del laboratorio
+
+def get_subnets_for_vpc(vpc_id):
+    """Obtiene las subnets de una VPC específica"""
+    try:
+        subnets = ec2.describe_subnets(Filters=[{'Name': 'vpc-id', 'Values': [vpc_id]}])
+        if subnets['Subnets']:
+            subnet_ids = [s['SubnetId'] for s in subnets['Subnets']]
+            return subnet_ids
+    except Exception as e:
+        print(f"⚠ No se pudo obtener Subnets (permisos limitados): {str(e)[:100]}...")
+    return []
+
+# Usar VPC predeterminada configurada
+vpc_id = os.environ.get('VPC_ID', DEFAULT_VPC_ID)
+subnet_ids = get_subnets_for_vpc(vpc_id)
+
+print(f"✓ VPC configurada: {vpc_id}")
+if subnet_ids:
+    print(f"✓ Subnets disponibles: {len(subnet_ids)}")
+else:
+    print("⚠ No se pudieron obtener subnets - RDS usará configuración por defecto")
+
+# ---------------------------
+# [1/5] CREACIÓN DE SECURITY GROUP PARA EC2 (WEB SERVER)
+# ---------------------------
+print("\n[1/5] Configurando Security Group para EC2 (Web Server)...")
+ec2_sg_id = None
+
+if EC2_SG_ID_ENV:
+    ec2_sg_id = EC2_SG_ID_ENV
+    print(f"✓ Usando Security Group EC2 especificado: {ec2_sg_id}")
+else:
+    try:
+        # Crear Security Group para EC2
+        sg_params = {
             'GroupName': EC2_SG_NAME,
             'Description': 'Security Group para EC2 Web Server - Permite HTTP desde Internet'
         }
@@ -553,3 +642,6 @@ print(f"  1. Cambia las contraseñas por defecto en producción")
 print(f"  2. El Security Group de RDS solo permite MySQL desde el SG de EC2")
 print(f"  3. La instancia EC2 está configurada con SSM para administración remota")
 print(f"  4. Los archivos sensibles (.env, init_db.sql) están fuera del webroot")
+print(f"  3. La instancia EC2 está configurada con SSM para administración remota")
+print(f"  4. Los archivos sensibles (.env, init_db.sql) están fuera del webroot")
+
