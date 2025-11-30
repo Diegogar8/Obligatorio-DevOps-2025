@@ -527,16 +527,4 @@ print("  ✓ Sin credenciales en user_data")
 print(f"\n🌐 ACCESO: http://{public_ip}/")
 print("=" * 70)
     
-print("\n🔒 MEDIDAS DE SEGURIDAD:")
-print("  ✓ Security Groups separados por capa")
-print("  ✓ RDS solo accesible desde EC2")
-print("  ✓ Encriptación en reposo para RDS")
-print("  ✓ SSH deshabilitado - usar SSM")
-print("  ✓ IMDSv2 requerido en EC2")
-print("  ✓ Sin credenciales en user_data")
-
-print(f"\n🌐 ACCESO: http://{public_ip}/")
-print("=" * 70)
-
-
 
