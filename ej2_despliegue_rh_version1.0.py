@@ -49,26 +49,28 @@ print("INICIANDO DESPLIEGUE DE APLICACIÓN DE RECURSOS HUMANOS")
 print("=" * 60)
 
 # ---------------------------
-# FUNCIÓN PARA OBTENER VPC Y SUBNET POR DEFECTO
+# FUNCIÓN PARA OBTENER VPC Y SUBNET POR DEFECTO (OPCIONAL)
 # ---------------------------
 def get_default_vpc_and_subnet():
-    """Obtiene la VPC por defecto y una subnet pública"""
+    """Obtiene la VPC por defecto y una subnet pública (si hay permisos)"""
     try:
         vpcs = ec2.describe_vpcs(Filters=[{'Name': 'isDefault', 'Values': ['true']}])
         if vpcs['Vpcs']:
             vpc_id = vpcs['Vpcs'][0]['VpcId']
             subnets = ec2.describe_subnets(Filters=[{'Name': 'vpc-id', 'Values': [vpc_id]}])
             if subnets['Subnets']:
-                # Obtener al menos 2 subnets para RDS (requerido para subnet group)
                 subnet_ids = [s['SubnetId'] for s in subnets['Subnets']]
                 return vpc_id, subnet_ids
     except Exception as e:
-        print(f"⚠ Error obteniendo VPC/Subnet por defecto: {e}")
+        print(f"⚠ No se pudo obtener VPC/Subnet (permisos limitados): {str(e)[:100]}...")
     return None, []
 
 vpc_id, subnet_ids = get_default_vpc_and_subnet()
-print(f"✓ VPC por defecto: {vpc_id}")
-print(f"✓ Subnets disponibles: {len(subnet_ids)}")
+if vpc_id:
+    print(f"✓ VPC por defecto: {vpc_id}")
+    print(f"✓ Subnets disponibles: {len(subnet_ids)}")
+else:
+    print("⚠ VPC no especificada - Se usará la VPC por defecto de la cuenta")
 
 # ---------------------------
 # [1/5] CREACIÓN DE SECURITY GROUP PARA EC2 (WEB SERVER)
@@ -82,11 +84,15 @@ if EC2_SG_ID_ENV:
 else:
     try:
         # Crear Security Group para EC2
-        response = ec2.create_security_group(
-            GroupName=EC2_SG_NAME,
-            Description='Security Group para EC2 Web Server - Permite HTTP desde Internet',
-            VpcId=vpc_id
-        )
+        sg_params = {
+            'GroupName': EC2_SG_NAME,
+            'Description': 'Security Group para EC2 Web Server - Permite HTTP desde Internet'
+        }
+        # Solo agregar VpcId si está disponible
+        if vpc_id:
+            sg_params['VpcId'] = vpc_id
+        
+        response = ec2.create_security_group(**sg_params)
         ec2_sg_id = response['GroupId']
         print(f"✓ Security Group EC2 creado: {ec2_sg_id}")
 
@@ -114,14 +120,14 @@ else:
         error_code = e.response.get('Error', {}).get('Code', '')
         if 'InvalidGroup.Duplicate' in str(e) or error_code == 'InvalidGroup.Duplicate':
             try:
-                response = ec2.describe_security_groups(
-                    Filters=[
-                        {'Name': 'group-name', 'Values': [EC2_SG_NAME]},
-                        {'Name': 'vpc-id', 'Values': [vpc_id]}
-                    ]
-                )
-                ec2_sg_id = response['SecurityGroups'][0]['GroupId']
-                print(f"⚠ Security Group EC2 ya existe: {ec2_sg_id}")
+                # Buscar SG existente por nombre
+                filters = [{'Name': 'group-name', 'Values': [EC2_SG_NAME]}]
+                if vpc_id:
+                    filters.append({'Name': 'vpc-id', 'Values': [vpc_id]})
+                response = ec2.describe_security_groups(Filters=filters)
+                if response['SecurityGroups']:
+                    ec2_sg_id = response['SecurityGroups'][0]['GroupId']
+                    print(f"⚠ Security Group EC2 ya existe: {ec2_sg_id}")
             except Exception as e2:
                 print(f"⚠ Error obteniendo SG existente: {e2}")
         else:
@@ -139,11 +145,15 @@ if RDS_SG_ID_ENV:
 else:
     try:
         # Crear Security Group para RDS
-        response = ec2.create_security_group(
-            GroupName=RDS_SG_NAME,
-            Description='Security Group para RDS - Solo permite MySQL desde EC2 SG',
-            VpcId=vpc_id
-        )
+        sg_params = {
+            'GroupName': RDS_SG_NAME,
+            'Description': 'Security Group para RDS - Solo permite MySQL desde EC2 SG'
+        }
+        # Solo agregar VpcId si está disponible
+        if vpc_id:
+            sg_params['VpcId'] = vpc_id
+        
+        response = ec2.create_security_group(**sg_params)
         rds_sg_id = response['GroupId']
         print(f"✓ Security Group RDS creado: {rds_sg_id}")
 
@@ -173,14 +183,14 @@ else:
         error_code = e.response.get('Error', {}).get('Code', '')
         if 'InvalidGroup.Duplicate' in str(e) or error_code == 'InvalidGroup.Duplicate':
             try:
-                response = ec2.describe_security_groups(
-                    Filters=[
-                        {'Name': 'group-name', 'Values': [RDS_SG_NAME]},
-                        {'Name': 'vpc-id', 'Values': [vpc_id]}
-                    ]
-                )
-                rds_sg_id = response['SecurityGroups'][0]['GroupId']
-                print(f"⚠ Security Group RDS ya existe: {rds_sg_id}")
+                # Buscar SG existente por nombre
+                filters = [{'Name': 'group-name', 'Values': [RDS_SG_NAME]}]
+                if vpc_id:
+                    filters.append({'Name': 'vpc-id', 'Values': [vpc_id]})
+                response = ec2.describe_security_groups(Filters=filters)
+                if response['SecurityGroups']:
+                    rds_sg_id = response['SecurityGroups'][0]['GroupId']
+                    print(f"⚠ Security Group RDS ya existe: {rds_sg_id}")
             except Exception as e2:
                 print(f"⚠ Error obteniendo SG existente: {e2}")
         else:
@@ -197,20 +207,25 @@ if RDS_ENDPOINT_ENV:
     print(f"✓ Usando RDS endpoint especificado: {db_endpoint}")
 else:
     try:
-        # Crear DB Subnet Group si no existe
-        db_subnet_group_name = 'rh-app-db-subnet-group'
-        try:
-            rds.create_db_subnet_group(
-                DBSubnetGroupName=db_subnet_group_name,
-                DBSubnetGroupDescription='Subnet group para RH App RDS',
-                SubnetIds=subnet_ids[:2] if len(subnet_ids) >= 2 else subnet_ids
-            )
-            print(f"✓ DB Subnet Group creado: {db_subnet_group_name}")
-        except ClientError as e:
-            if 'DBSubnetGroupAlreadyExists' in str(e):
-                print(f"⚠ DB Subnet Group ya existe: {db_subnet_group_name}")
-            else:
-                print(f"⚠ Error creando DB Subnet Group: {e}")
+        # Crear DB Subnet Group solo si tenemos subnets disponibles
+        db_subnet_group_name = None
+        if len(subnet_ids) >= 2:
+            db_subnet_group_name = 'rh-app-db-subnet-group'
+            try:
+                rds.create_db_subnet_group(
+                    DBSubnetGroupName=db_subnet_group_name,
+                    DBSubnetGroupDescription='Subnet group para RH App RDS',
+                    SubnetIds=subnet_ids[:2]
+                )
+                print(f"✓ DB Subnet Group creado: {db_subnet_group_name}")
+            except ClientError as e:
+                if 'DBSubnetGroupAlreadyExists' in str(e):
+                    print(f"⚠ DB Subnet Group ya existe: {db_subnet_group_name}")
+                else:
+                    print(f"⚠ Error creando DB Subnet Group: {e}")
+                    db_subnet_group_name = None
+        else:
+            print("⚠ No hay suficientes subnets - RDS usará configuración por defecto")
 
         # Crear instancia RDS
         create_params = {
@@ -225,12 +240,15 @@ else:
             'PubliclyAccessible': False,
             'StorageEncrypted': True,
             'BackupRetentionPeriod': 7,
-            'DBSubnetGroupName': db_subnet_group_name,
             'Tags': [
                 {'Key': 'Name', 'Value': DB_INSTANCE_ID},
                 {'Key': 'Application', 'Value': 'Recursos Humanos'}
             ]
         }
+        
+        # Agregar DB Subnet Group solo si fue creado
+        if db_subnet_group_name:
+            create_params['DBSubnetGroupName'] = db_subnet_group_name
         
         # Asociar Security Group de RDS si existe
         if rds_sg_id:
