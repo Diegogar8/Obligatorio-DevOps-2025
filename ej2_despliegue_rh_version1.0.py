@@ -1,1100 +1,171 @@
 #!/usr/bin/env python3
-"""
-Script de Despliegue Automatizado - Aplicacion de Recursos Humanos
-===================================================================
-Arquitectura de dos capas: EC2 (Web Server) + RDS (MySQL)
-Incluye medidas de seguridad para proteger datos sensibles.
 
-Autor: Deployment Automation Script
-Fecha: 2025
-"""
-
-import boto3
-import time
-import secrets
-import string
-import sys
-from botocore.exceptions import ClientError
-
-
-# =============================================================================
-# CONFIGURACION
-# =============================================================================
-
-AWS_REGION = "us-east-1"
-
-# Configuracion EC2
-EC2_INSTANCE_TYPE = "t2.micro"
-EC2_KEY_NAME = "hr-app-key"  # Nombre del key pair (debe existir o se creara)
-EC2_AMI_ID = None  # Se buscara automaticamente la ultima Amazon Linux 2023
-
-# Configuracion RDS
-RDS_INSTANCE_CLASS = "db.t3.micro"
-RDS_ENGINE = "mysql"
-RDS_ENGINE_VERSION = "8.0"
-RDS_DB_NAME = "hr_database"
-RDS_MASTER_USERNAME = "hr_admin"
-RDS_ALLOCATED_STORAGE = 20
-
-# Nombres de recursos
-VPC_NAME = "hr-app-vpc"
-EC2_SG_NAME = "hr-web-server-sg"
-RDS_SG_NAME = "hr-database-sg"
-EC2_INSTANCE_NAME = "HR-WebServer"
-RDS_INSTANCE_NAME = "hr-database"
-
-
-# =============================================================================
-# FUNCIONES AUXILIARES
-# =============================================================================
-
-def generate_secure_password(length=24):
-    """Genera una contrasena segura para RDS."""
-    alphabet = string.ascii_letters + string.digits + "!@#$%^&*"
-    # Evitar caracteres problematicos para MySQL
-    password = ''.join(secrets.choice(alphabet) for _ in range(length))
-    return password
-
-
-def get_latest_amazon_linux_ami(ec2_client):
-    """Obtiene el AMI mas reciente de Amazon Linux 2023."""
-    print("Buscando AMI mas reciente de Amazon Linux 2023...")
-    
-    response = ec2_client.describe_images(
-        Owners=['amazon'],
-        Filters=[
-            {'Name': 'name', 'Values': ['al2023-ami-2023*-x86_64']},
-            {'Name': 'state', 'Values': ['available']},
-            {'Name': 'architecture', 'Values': ['x86_64']},
-            {'Name': 'virtualization-type', 'Values': ['hvm']},
-            {'Name': 'root-device-type', 'Values': ['ebs']}
-        ]
-    )
-    
-    images = sorted(response['Images'], key=lambda x: x['CreationDate'], reverse=True)
-    
-    if not images:
-        raise Exception("No se encontro ningun AMI de Amazon Linux 2023")
-    
-    ami_id = images[0]['ImageId']
-    print(f"   [OK] AMI seleccionado: {ami_id}")
-    return ami_id
-
-
-def wait_for_instance_running(ec2_client, instance_id):
-    """Espera hasta que la instancia EC2 este en estado running."""
-    print(f"Esperando a que la instancia {instance_id} este en estado running...")
-    
-    waiter = ec2_client.get_waiter('instance_running')
-    waiter.wait(
-        InstanceIds=[instance_id],
-        WaiterConfig={
-            'Delay': 10,
-            'MaxAttempts': 60
-        }
-    )
-    
-    # Obtener informacion de la instancia
-    response = ec2_client.describe_instances(InstanceIds=[instance_id])
-    instance = response['Reservations'][0]['Instances'][0]
-    
-    print(f"   [OK] Instancia en estado running")
-    print(f"   IP Publica: {instance.get('PublicIpAddress', 'N/A')}")
-    print(f"   IP Privada: {instance.get('PrivateIpAddress', 'N/A')}")
-    
-    return instance
-
-
-def wait_for_rds_available(rds_client, db_instance_id):
-    """Espera hasta que la instancia RDS este disponible."""
-    print(f"Esperando a que RDS {db_instance_id} este disponible (esto puede tomar varios minutos)...")
-    
-    waiter = rds_client.get_waiter('db_instance_available')
-    waiter.wait(
-        DBInstanceIdentifier=db_instance_id,
-        WaiterConfig={
-            'Delay': 30,
-            'MaxAttempts': 60
-        }
-    )
-    
-    response = rds_client.describe_db_instances(DBInstanceIdentifier=db_instance_id)
-    db_instance = response['DBInstances'][0]
-    
-    print(f"   [OK] RDS disponible")
-    print(f"   Endpoint: {db_instance['Endpoint']['Address']}")
-    
-    return db_instance
-
-
-# =============================================================================
-# SCRIPT DE USER DATA PARA EC2
-# =============================================================================
-
-def get_user_data_script(rds_endpoint, rds_password):
-    """Genera el script de configuracion para EC2 con Apache y la aplicacion."""
-    
-    return f'''#!/bin/bash
-set -e
-
-# =============================================================================
-# CONFIGURACION INICIAL DEL SERVIDOR WEB
-# =============================================================================
-
-echo "=========================================="
-echo "INICIANDO CONFIGURACION DEL SERVIDOR WEB"
-echo "=========================================="
-
-# Actualizar sistema
-dnf update -y
-
-# Instalar Apache, PHP y MySQL client
-dnf install -y httpd php php-mysqlnd php-json php-mbstring mariadb105
-
-# Iniciar y habilitar Apache
-systemctl start httpd
-systemctl enable httpd
-
-# =============================================================================
-# CONFIGURACION DE SEGURIDAD DE APACHE
-# =============================================================================
-
-# Configurar headers de seguridad
-cat >> /etc/httpd/conf/httpd.conf << 'SECURITY_HEADERS'
-
-# Headers de Seguridad
-<IfModule mod_headers.c>
-    Header always set X-Content-Type-Options "nosniff"
-    Header always set X-Frame-Options "DENY"
-    Header always set X-XSS-Protection "1; mode=block"
-    Header always set Referrer-Policy "strict-origin-when-cross-origin"
-    Header always set Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'"
-    Header always unset X-Powered-By
-    Header always unset Server
-</IfModule>
-
-# Ocultar version de Apache
-ServerTokens Prod
-ServerSignature Off
-
-# Deshabilitar listado de directorios
-<Directory /var/www/html>
-    Options -Indexes +FollowSymLinks
-    AllowOverride All
-</Directory>
-
-SECURITY_HEADERS
-
-# =============================================================================
-# CONFIGURACION DE PHP SEGURA
-# =============================================================================
-
-cat > /etc/php.d/99-security.ini << 'PHP_SECURITY'
-; Configuracion de seguridad de PHP
-expose_php = Off
-display_errors = Off
-log_errors = On
-error_log = /var/log/php_errors.log
-session.cookie_httponly = 1
-session.cookie_secure = 0
-session.use_strict_mode = 1
-session.cookie_samesite = Strict
-disable_functions = exec,passthru,shell_exec,system,proc_open,popen
-PHP_SECURITY
-
-# =============================================================================
-# CREAR ARCHIVO DE CONFIGURACION DE BASE DE DATOS (PROTEGIDO)
-# =============================================================================
-
-mkdir -p /var/www/config
-chmod 750 /var/www/config
-
-cat > /var/www/config/database.php << 'DB_CONFIG'
-<?php
-// Configuracion de Base de Datos - ARCHIVO PROTEGIDO
-// No exponer este archivo al publico
-
-define('DB_HOST', '{rds_endpoint}');
-define('DB_NAME', '{RDS_DB_NAME}');
-define('DB_USER', '{RDS_MASTER_USERNAME}');
-define('DB_PASS', '{rds_password}');
-define('DB_CHARSET', 'utf8mb4');
-
-// Opciones PDO seguras
-define('DB_OPTIONS', [
-    PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
-    PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
-    PDO::ATTR_EMULATE_PREPARES => false,
-    PDO::MYSQL_ATTR_SSL_VERIFY_SERVER_CERT => false
-]);
-DB_CONFIG
-
-chmod 640 /var/www/config/database.php
-chown apache:apache /var/www/config/database.php
-
-# =============================================================================
-# CREAR APLICACION DE RECURSOS HUMANOS
-# =============================================================================
-
-# Pagina principal - Lista de empleados
-cat > /var/www/html/index.php << 'INDEX_PHP'
-<?php
-/**
- * Sistema de Gestion de Recursos Humanos
- * Aplicacion segura para manejo de datos de empleados
- */
-
-session_start();
-require_once '/var/www/config/database.php';
-
-// Funcion para conectar a la base de datos
-function getDBConnection() {{
-    try {{
-        $dsn = "mysql:host=" . DB_HOST . ";dbname=" . DB_NAME . ";charset=" . DB_CHARSET;
-        return new PDO($dsn, DB_USER, DB_PASS, DB_OPTIONS);
-    }} catch (PDOException $e) {{
-        error_log("Error de conexion: " . $e->getMessage());
-        return null;
-    }}
-}}
-
-// Funcion para sanitizar salida (prevenir XSS)
-function sanitize($data) {{
-    return htmlspecialchars($data, ENT_QUOTES, 'UTF-8');
-}}
-
-// Funcion para enmascarar datos sensibles
-function maskEmail($email) {{
-    $parts = explode('@', $email);
-    if (count($parts) == 2) {{
-        $name = $parts[0];
-        $domain = $parts[1];
-        $masked = substr($name, 0, 2) . str_repeat('*', max(strlen($name) - 2, 3));
-        return $masked . '@' . $domain;
-    }}
-    return '***@***.***';
-}}
-
-function maskSalary($salary) {{
-    // Solo mostrar rango salarial, no el monto exacto
-    $salary = floatval($salary);
-    if ($salary < 30000) return '$20,000 - $30,000';
-    if ($salary < 50000) return '$30,000 - $50,000';
-    if ($salary < 75000) return '$50,000 - $75,000';
-    if ($salary < 100000) return '$75,000 - $100,000';
-    return '$100,000+';
-}}
-
-$pdo = getDBConnection();
-$employees = [];
-$error = null;
-
-if ($pdo) {{
-    try {{
-        // Usar prepared statements para prevenir SQL Injection
-        $stmt = $pdo->prepare("SELECT id, nombre, email, salario, departamento, fecha_ingreso FROM empleados ORDER BY nombre");
-        $stmt->execute();
-        $employees = $stmt->fetchAll();
-    }} catch (PDOException $e) {{
-        error_log("Error en consulta: " . $e->getMessage());
-        $error = "Error al cargar los datos.";
-    }}
-}}
-?>
-<!DOCTYPE html>
-<html lang="es">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta http-equiv="X-UA-Compatible" content="IE=edge">
-    <title>Sistema de Recursos Humanos</title>
-    <style>
-        :root {{
-            --primary: #2563eb;
-            --primary-dark: #1d4ed8;
-            --success: #059669;
-            --warning: #d97706;
-            --danger: #dc2626;
-            --gray-50: #f9fafb;
-            --gray-100: #f3f4f6;
-            --gray-200: #e5e7eb;
-            --gray-700: #374151;
-            --gray-900: #111827;
-        }}
-        
-        * {{
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-        }}
-        
-        body {{
-            font-family: 'Segoe UI', system-ui, sans-serif;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            min-height: 100vh;
-            padding: 2rem;
-        }}
-        
-        .container {{
-            max-width: 1200px;
-            margin: 0 auto;
-        }}
-        
-        .header {{
-            background: white;
-            border-radius: 1rem;
-            padding: 2rem;
-            margin-bottom: 2rem;
-            box-shadow: 0 10px 40px rgba(0,0,0,0.1);
-        }}
-        
-        .header h1 {{
-            color: var(--gray-900);
-            font-size: 2rem;
-            margin-bottom: 0.5rem;
-        }}
-        
-        .header p {{
-            color: var(--gray-700);
-        }}
-        
-        .security-badge {{
-            display: inline-flex;
-            align-items: center;
-            gap: 0.5rem;
-            background: #dcfce7;
-            color: var(--success);
-            padding: 0.5rem 1rem;
-            border-radius: 2rem;
-            font-size: 0.875rem;
-            font-weight: 500;
-            margin-top: 1rem;
-        }}
-        
-        .card {{
-            background: white;
-            border-radius: 1rem;
-            box-shadow: 0 10px 40px rgba(0,0,0,0.1);
-            overflow: hidden;
-        }}
-        
-        .card-header {{
-            background: var(--gray-50);
-            padding: 1.5rem;
-            border-bottom: 1px solid var(--gray-200);
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-        }}
-        
-        .card-header h2 {{
-            color: var(--gray-900);
-            font-size: 1.25rem;
-        }}
-        
-        .btn {{
-            display: inline-flex;
-            align-items: center;
-            gap: 0.5rem;
-            padding: 0.75rem 1.5rem;
-            border-radius: 0.5rem;
-            font-weight: 500;
-            text-decoration: none;
-            cursor: pointer;
-            border: none;
-            transition: all 0.2s;
-        }}
-        
-        .btn-primary {{
-            background: var(--primary);
-            color: white;
-        }}
-        
-        .btn-primary:hover {{
-            background: var(--primary-dark);
-        }}
-        
-        table {{
-            width: 100%;
-            border-collapse: collapse;
-        }}
-        
-        th, td {{
-            padding: 1rem 1.5rem;
-            text-align: left;
-            border-bottom: 1px solid var(--gray-200);
-        }}
-        
-        th {{
-            background: var(--gray-50);
-            font-weight: 600;
-            color: var(--gray-700);
-            font-size: 0.875rem;
-            text-transform: uppercase;
-            letter-spacing: 0.05em;
-        }}
-        
-        tr:hover {{
-            background: var(--gray-50);
-        }}
-        
-        .employee-name {{
-            font-weight: 600;
-            color: var(--gray-900);
-        }}
-        
-        .masked-data {{
-            color: var(--gray-700);
-            font-family: monospace;
-        }}
-        
-        .department {{
-            display: inline-block;
-            padding: 0.25rem 0.75rem;
-            background: #dbeafe;
-            color: var(--primary);
-            border-radius: 1rem;
-            font-size: 0.875rem;
-        }}
-        
-        .salary-range {{
-            color: var(--success);
-            font-weight: 500;
-        }}
-        
-        .empty-state {{
-            text-align: center;
-            padding: 4rem 2rem;
-            color: var(--gray-700);
-        }}
-        
-        .empty-state h3 {{
-            margin-bottom: 0.5rem;
-            color: var(--gray-900);
-        }}
-        
-        .footer {{
-            text-align: center;
-            padding: 2rem;
-            color: rgba(255,255,255,0.8);
-            font-size: 0.875rem;
-        }}
-        
-        .alert {{
-            padding: 1rem 1.5rem;
-            border-radius: 0.5rem;
-            margin-bottom: 1rem;
-        }}
-        
-        .alert-error {{
-            background: #fef2f2;
-            color: var(--danger);
-            border: 1px solid #fecaca;
-        }}
-        
-        .info-banner {{
-            background: #eff6ff;
-            border: 1px solid #bfdbfe;
-            color: var(--primary);
-            padding: 1rem 1.5rem;
-            border-radius: 0.5rem;
-            margin-bottom: 1rem;
-            font-size: 0.875rem;
-        }}
-    </style>
-</head>
-<body>
-    <div class="container">
-        <div class="header">
-            <h1>Sistema de Gestion de Recursos Humanos</h1>
-            <p>Gestion segura de informacion de empleados</p>
-            <div class="security-badge">
-                Datos protegidos y enmascarados
-            </div>
-        </div>
-        
-        <?php if ($error): ?>
-            <div class="alert alert-error">
-                <?php echo sanitize($error); ?>
-            </div>
-        <?php endif; ?>
-        
-        <div class="info-banner">
-            Por politicas de seguridad, los emails y salarios se muestran de forma enmascarada. 
-            Solo personal autorizado puede ver los datos completos.
-        </div>
-        
-        <div class="card">
-            <div class="card-header">
-                <h2>Directorio de Empleados</h2>
-                <a href="add_employee.php" class="btn btn-primary">
-                    + Agregar Empleado
-                </a>
-            </div>
-            
-            <?php if (empty($employees)): ?>
-                <div class="empty-state">
-                    <h3>No hay empleados registrados</h3>
-                    <p>Comienza agregando el primer empleado al sistema.</p>
-                </div>
-            <?php else: ?>
-                <table>
-                    <thead>
-                        <tr>
-                            <th>ID</th>
-                            <th>Nombre</th>
-                            <th>Email</th>
-                            <th>Departamento</th>
-                            <th>Rango Salarial</th>
-                            <th>Fecha Ingreso</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        <?php foreach ($employees as $emp): ?>
-                            <tr>
-                                <td><?php echo sanitize($emp['id']); ?></td>
-                                <td class="employee-name"><?php echo sanitize($emp['nombre']); ?></td>
-                                <td class="masked-data"><?php echo maskEmail($emp['email']); ?></td>
-                                <td><span class="department"><?php echo sanitize($emp['departamento']); ?></span></td>
-                                <td class="salary-range"><?php echo maskSalary($emp['salario']); ?></td>
-                                <td><?php echo sanitize($emp['fecha_ingreso']); ?></td>
-                            </tr>
-                        <?php endforeach; ?>
-                    </tbody>
-                </table>
-            <?php endif; ?>
-        </div>
-        
-        <div class="footer">
-            <p>Sistema de Recursos Humanos v1.0 | Datos Confidenciales - Acceso Restringido</p>
-            <p>Conexion segura a base de datos MySQL en Amazon RDS</p>
-        </div>
-    </div>
-</body>
-</html>
-INDEX_PHP
-
-# Pagina para agregar empleados
-cat > /var/www/html/add_employee.php << 'ADD_PHP'
-<?php
-/**
- * Formulario para agregar empleados
- * Incluye validacion y proteccion contra CSRF
- */
-
-session_start();
-require_once '/var/www/config/database.php';
-
-// Generar token CSRF
-if (empty($_SESSION['csrf_token'])) {{
-    $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
-}}
-
-function getDBConnection() {{
-    try {{
-        $dsn = "mysql:host=" . DB_HOST . ";dbname=" . DB_NAME . ";charset=" . DB_CHARSET;
-        return new PDO($dsn, DB_USER, DB_PASS, DB_OPTIONS);
-    }} catch (PDOException $e) {{
-        error_log("Error de conexion: " . $e->getMessage());
-        return null;
-    }}
-}}
-
-function sanitize($data) {{
-    return htmlspecialchars(trim($data), ENT_QUOTES, 'UTF-8');
-}}
-
-function validateEmail($email) {{
-    return filter_var($email, FILTER_VALIDATE_EMAIL) !== false;
-}}
-
-function validateSalary($salary) {{
-    return is_numeric($salary) && $salary > 0 && $salary < 10000000;
-}}
-
-$message = '';
-$messageType = '';
-
-if ($_SERVER['REQUEST_METHOD'] === 'POST') {{
-    // Verificar token CSRF
-    if (!isset($_POST['csrf_token']) || $_POST['csrf_token'] !== $_SESSION['csrf_token']) {{
-        $message = 'Error de seguridad: Token invalido.';
-        $messageType = 'error';
-    }} else {{
-        $nombre = trim($_POST['nombre'] ?? '');
-        $email = trim($_POST['email'] ?? '');
-        $salario = $_POST['salario'] ?? '';
-        $departamento = trim($_POST['departamento'] ?? '');
-        
-        // Validaciones
-        $errors = [];
-        
-        if (empty($nombre) || strlen($nombre) < 2 || strlen($nombre) > 100) {{
-            $errors[] = 'El nombre debe tener entre 2 y 100 caracteres.';
-        }}
-        
-        if (!validateEmail($email)) {{
-            $errors[] = 'El email no es valido.';
-        }}
-        
-        if (!validateSalary($salario)) {{
-            $errors[] = 'El salario debe ser un numero positivo valido.';
-        }}
-        
-        if (empty($departamento)) {{
-            $errors[] = 'Debe seleccionar un departamento.';
-        }}
-        
-        if (empty($errors)) {{
-            $pdo = getDBConnection();
-            if ($pdo) {{
-                try {{
-                    $stmt = $pdo->prepare("INSERT INTO empleados (nombre, email, salario, departamento, fecha_ingreso) VALUES (?, ?, ?, ?, CURDATE())");
-                    $stmt->execute([$nombre, $email, $salario, $departamento]);
-                    
-                    $message = 'Empleado agregado exitosamente.';
-                    $messageType = 'success';
-                    
-                    // Regenerar token CSRF
-                    $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
-                    
-                }} catch (PDOException $e) {{
-                    error_log("Error al insertar: " . $e->getMessage());
-                    if ($e->getCode() == 23000) {{
-                        $message = 'Ya existe un empleado con ese email.';
-                    }} else {{
-                        $message = 'Error al guardar el empleado.';
-                    }}
-                    $messageType = 'error';
-                }}
-            }} else {{
-                $message = 'Error de conexion a la base de datos.';
-                $messageType = 'error';
-            }}
-        }} else {{
-            $message = implode(' ', $errors);
-            $messageType = 'error';
-        }}
-    }}
-}}
-?>
-<!DOCTYPE html>
-<html lang="es">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Agregar Empleado - Sistema RH</title>
-    <style>
-        :root {{
-            --primary: #2563eb;
-            --primary-dark: #1d4ed8;
-            --success: #059669;
-            --danger: #dc2626;
-            --gray-50: #f9fafb;
-            --gray-100: #f3f4f6;
-            --gray-200: #e5e7eb;
-            --gray-700: #374151;
-            --gray-900: #111827;
-        }}
-        
-        * {{ margin: 0; padding: 0; box-sizing: border-box; }}
-        
-        body {{
-            font-family: 'Segoe UI', system-ui, sans-serif;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            min-height: 100vh;
-            padding: 2rem;
-        }}
-        
-        .container {{
-            max-width: 600px;
-            margin: 0 auto;
-        }}
-        
-        .card {{
-            background: white;
-            border-radius: 1rem;
-            box-shadow: 0 10px 40px rgba(0,0,0,0.1);
-            overflow: hidden;
-        }}
-        
-        .card-header {{
-            background: var(--gray-50);
-            padding: 1.5rem;
-            border-bottom: 1px solid var(--gray-200);
-        }}
-        
-        .card-header h1 {{
-            color: var(--gray-900);
-            font-size: 1.5rem;
-        }}
-        
-        .card-body {{
-            padding: 2rem;
-        }}
-        
-        .form-group {{
-            margin-bottom: 1.5rem;
-        }}
-        
-        label {{
-            display: block;
-            margin-bottom: 0.5rem;
-            font-weight: 500;
-            color: var(--gray-700);
-        }}
-        
-        input, select {{
-            width: 100%;
-            padding: 0.75rem 1rem;
-            border: 2px solid var(--gray-200);
-            border-radius: 0.5rem;
-            font-size: 1rem;
-            transition: border-color 0.2s;
-        }}
-        
-        input:focus, select:focus {{
-            outline: none;
-            border-color: var(--primary);
-        }}
-        
-        .btn {{
-            display: inline-flex;
-            align-items: center;
-            gap: 0.5rem;
-            padding: 0.75rem 1.5rem;
-            border-radius: 0.5rem;
-            font-weight: 500;
-            text-decoration: none;
-            cursor: pointer;
-            border: none;
-            font-size: 1rem;
-            transition: all 0.2s;
-        }}
-        
-        .btn-primary {{
-            background: var(--primary);
-            color: white;
-        }}
-        
-        .btn-primary:hover {{
-            background: var(--primary-dark);
-        }}
-        
-        .btn-secondary {{
-            background: var(--gray-200);
-            color: var(--gray-700);
-        }}
-        
-        .btn-group {{
-            display: flex;
-            gap: 1rem;
-            margin-top: 2rem;
-        }}
-        
-        .alert {{
-            padding: 1rem;
-            border-radius: 0.5rem;
-            margin-bottom: 1.5rem;
-        }}
-        
-        .alert-success {{
-            background: #dcfce7;
-            color: var(--success);
-            border: 1px solid #bbf7d0;
-        }}
-        
-        .alert-error {{
-            background: #fef2f2;
-            color: var(--danger);
-            border: 1px solid #fecaca;
-        }}
-        
-        .security-note {{
-            background: #fffbeb;
-            border: 1px solid #fde68a;
-            color: #92400e;
-            padding: 1rem;
-            border-radius: 0.5rem;
-            font-size: 0.875rem;
-            margin-top: 1.5rem;
-        }}
-    </style>
-</head>
-<body>
-    <div class="container">
-        <div class="card">
-            <div class="card-header">
-                <h1>Agregar Nuevo Empleado</h1>
-            </div>
-            <div class="card-body">
-                <?php if ($message): ?>
-                    <div class="alert alert-<?php echo $messageType; ?>">
-                        <?php echo sanitize($message); ?>
-                    </div>
-                <?php endif; ?>
-                
-                <form method="POST" action="">
-                    <input type="hidden" name="csrf_token" value="<?php echo $_SESSION['csrf_token']; ?>">
-                    
-                    <div class="form-group">
-                        <label for="nombre">Nombre Completo *</label>
-                        <input type="text" id="nombre" name="nombre" required 
-                               minlength="2" maxlength="100"
-                               placeholder="Ej: Juan Perez Garcia">
-                    </div>
-                    
-                    <div class="form-group">
-                        <label for="email">Correo Electronico *</label>
-                        <input type="email" id="email" name="email" required 
-                               placeholder="empleado@empresa.com">
-                    </div>
-                    
-                    <div class="form-group">
-                        <label for="salario">Salario Anual (USD) *</label>
-                        <input type="number" id="salario" name="salario" required 
-                               min="1" max="9999999" step="0.01"
-                               placeholder="50000">
-                    </div>
-                    
-                    <div class="form-group">
-                        <label for="departamento">Departamento *</label>
-                        <select id="departamento" name="departamento" required>
-                            <option value="">Seleccionar...</option>
-                            <option value="Tecnologia">Tecnologia</option>
-                            <option value="Recursos Humanos">Recursos Humanos</option>
-                            <option value="Finanzas">Finanzas</option>
-                            <option value="Marketing">Marketing</option>
-                            <option value="Operaciones">Operaciones</option>
-                            <option value="Ventas">Ventas</option>
-                            <option value="Legal">Legal</option>
-                        </select>
-                    </div>
-                    
-                    <div class="btn-group">
-                        <button type="submit" class="btn btn-primary">
-                            Guardar Empleado
-                        </button>
-                        <a href="index.php" class="btn btn-secondary">
-                            Volver al Listado
-                        </a>
-                    </div>
-                </form>
-                
-                <div class="security-note">
-                    <strong>Nota de Seguridad:</strong> Todos los datos ingresados son 
-                    almacenados de forma segura y encriptada en la base de datos.
-                </div>
-            </div>
-        </div>
-    </div>
-</body>
-</html>
-ADD_PHP
-
-# Pagina de estado de salud (para monitoreo)
-cat > /var/www/html/health.php << 'HEALTH_PHP'
-<?php
-header('Content-Type: application/json');
-
-require_once '/var/www/config/database.php';
-
-$status = [
-    'status' => 'healthy',
-    'timestamp' => date('c'),
-    'services' => [
-        'web' => 'up',
-        'database' => 'unknown'
-    ]
-];
-
-try {{
-    $dsn = "mysql:host=" . DB_HOST . ";dbname=" . DB_NAME . ";charset=" . DB_CHARSET;
-    $pdo = new PDO($dsn, DB_USER, DB_PASS, DB_OPTIONS);
-    $pdo->query("SELECT 1");
-    $status['services']['database'] = 'up';
-}} catch (Exception $e) {{
-    $status['services']['database'] = 'down';
-    $status['status'] = 'degraded';
-}}
-
-http_response_code($status['status'] === 'healthy' ? 200 : 503);
-echo json_encode($status, JSON_PRETTY_PRINT);
-HEALTH_PHP
-
-# =============================================================================
-# CONFIGURAR PERMISOS
-# =============================================================================
-
-chown -R apache:apache /var/www/html
-chmod -R 755 /var/www/html
-chmod 644 /var/www/html/*.php
-
-# Proteger archivos de configuracion
-cat > /var/www/html/.htaccess << 'HTACCESS'
-# Denegar acceso a archivos sensibles
-<Files "*.php">
-    Order Allow,Deny
-    Allow from all
-</Files>
-
-<Files ".ht*">
-    Order Allow,Deny
-    Deny from all
-</Files>
-
-# Prevenir acceso directo a includes
-<Files "config.php">
-    Order Allow,Deny
-    Deny from all
-</Files>
-
-# Configuracion adicional de seguridad
-Options -Indexes
-HTACCESS
-
-# =============================================================================
-# REINICIAR APACHE
-# =============================================================================
-
-systemctl restart httpd
-
-echo "=========================================="
-echo "CONFIGURACION COMPLETADA EXITOSAMENTE"
-echo "=========================================="
-'''
-
-
-# =============================================================================
-# FUNCIONES PRINCIPALES DE DESPLIEGUE
-# =============================================================================
-
-def create_security_groups(ec2_client, vpc_id):
-    """Crea los Security Groups para EC2 y RDS."""
-    
-    print("\n" + "="*60)
-    print("CREANDO SECURITY GROUPS")
-    print("="*60)
-    
-    # Security Group para EC2 (Web Server)
-    print(f"\nCreando Security Group para Web Server...")
-    
+import boto3          # SDK de AWS para Python (para usar EC2, RDS, etc.)
+import os             # Para leer variables de entorno del sistema
+import sys            # Para salir con códigos de error y escribir en stderr
+import time           # Para esperas y reintentos
+from botocore.exceptions import ClientError  # Excepción específica de errores de AWS
+
+# ---------------------------
+# CONSTANTES DE CONFIGURACIÓN
+# ---------------------------
+REGION = 'us-east-1'                       # Región de AWS donde se desplegarán los recursos
+AMI_ID = 'ami-06b21ccaeff8cd686'           # ID de la AMI utilizada para la instancia EC2
+INSTANCE_TYPE = 't2.micro'                 # Tipo de instancia EC2
+SG_EC2_NAME = 'rh-app-ec2-sg'              # Nombre del Security Group para EC2 (Web Server)
+SG_RDS_NAME = 'rh-app-rds-sg'              # Nombre del Security Group para RDS (Base de datos)
+DB_INSTANCE_ID = 'rh-app-db'               # Identificador de la instancia RDS
+DB_NAME = 'demo_db'                        # Nombre de la base de datos que se creará en RDS
+DB_USER = 'admin'                          # Usuario administrador de la base de datos
+APP_NAME = 'rh-app-web'                    # Nombre que se usará como tag de la instancia EC2
+
+# ---------------------------
+# LECTURA DE VARIABLES DE ENTORNO
+# ---------------------------
+SG_EC2_ID_ENV = os.environ.get('SECURITY_GROUP_EC2_ID')  # Si está, se usará este Security Group para EC2
+SG_RDS_ID_ENV = os.environ.get('SECURITY_GROUP_RDS_ID')  # Si está, se usará este Security Group para RDS
+RDS_ENDPOINT_ENV = os.environ.get('RDS_ENDPOINT')        # Si está, se usará este endpoint de RDS ya existente
+RDS_PASSWORD = os.environ.get('RDS_ADMIN_PASSWORD')      # Password del usuario admin de RDS
+
+# Si no se definió la variable de entorno con la contraseña, el script no puede continuar
+if not RDS_PASSWORD:
+    print("Error: Debes definir la variable de entorno RDS_ADMIN_PASSWORD", file=sys.stderr)
+    print("Ejemplo: export RDS_ADMIN_PASSWORD='tu_password_seguro'", file=sys.stderr)
+    sys.exit(1)  # Sale con código de error 1
+
+# ---------------------------
+# CLIENTES DE AWS (EC2 y RDS)
+# ---------------------------
+ec2 = boto3.client('ec2', region_name=REGION)  # Cliente para interactuar con EC2
+rds = boto3.client('rds', region_name=REGION)  # Cliente para interactuar con RDS
+
+# Mensajes iniciales de log
+print("=" * 60)
+print("INICIANDO DESPLIEGUE DE APLICACIÓN DE RECURSOS HUMANOS")
+print("Arquitectura: EC2 (Web Server + Apache) + RDS (MySQL)")
+print("=" * 60)
+
+# ---------------------------
+# PASO 1: CREAR SECURITY GROUP PARA EC2 (WEB SERVER)
+# ---------------------------
+print("\n[1/5] Configurando Security Group para EC2 (Web Server)...")
+
+sg_ec2_id = None  # Aquí se guardará el ID del Security Group de EC2
+
+# Si el usuario definió un SECURITY_GROUP_EC2_ID por variable de entorno, se usa directamente
+if SG_EC2_ID_ENV:
+    sg_ec2_id = SG_EC2_ID_ENV
+    print(f"✓ Usando Security Group EC2 especificado: {sg_ec2_id}")
+else:
+    # Si no hay SG especificado, se intenta crear uno nuevo
     try:
-        ec2_sg = ec2_client.create_security_group(
-            GroupName=EC2_SG_NAME,
-            Description='Security Group for Web Server - HTTP/HTTPS only',
-            VpcId=vpc_id,
-            TagSpecifications=[
-                {
-                    'ResourceType': 'security-group',
-                    'Tags': [
-                        {'Key': 'Name', 'Value': EC2_SG_NAME},
-                        {'Key': 'Application', 'Value': 'HR-System'},
-                        {'Key': 'Environment', 'Value': 'Production'}
-                    ]
-                }
-            ]
-        )
-        ec2_sg_id = ec2_sg['GroupId']
-        print(f"   [OK] Security Group EC2 creado: {ec2_sg_id}")
-    except ClientError as e:
-        if 'InvalidGroup.Duplicate' in str(e):
-            response = ec2_client.describe_security_groups(
-                Filters=[
-                    {'Name': 'group-name', 'Values': [EC2_SG_NAME]},
-                    {'Name': 'vpc-id', 'Values': [vpc_id]}
-                ]
-            )
-            ec2_sg_id = response['SecurityGroups'][0]['GroupId']
-            print(f"   [!] Security Group EC2 ya existe: {ec2_sg_id}")
+        # Obtener el VPC por defecto para asociar el Security Group
+        vpc_response = ec2.describe_vpcs(Filters=[{'Name': 'is-default', 'Values': ['true']}])
+        if vpc_response['Vpcs']:
+            vpc_id = vpc_response['Vpcs'][0]['VpcId']
         else:
-            raise
-    
-    # Agregar reglas de ingreso para EC2
-    try:
-        ec2_client.authorize_security_group_ingress(
-            GroupId=ec2_sg_id,
+            # Si no hay VPC default, usar el primero disponible
+            vpc_response = ec2.describe_vpcs()
+            vpc_id = vpc_response['Vpcs'][0]['VpcId']
+        
+        response = ec2.create_security_group(
+            GroupName=SG_EC2_NAME,
+            Description='Security Group para EC2 Web Server - Permite HTTP desde Internet',
+            VpcId=vpc_id
+        )
+        sg_ec2_id = response['GroupId']  # Guardamos el ID del SG recién creado
+        print(f"✓ Security Group EC2 creado: {sg_ec2_id}")
+        
+        # Se agrega regla de entrada para HTTP (80) desde cualquier IP (expuesto a Internet)
+        ec2.authorize_security_group_ingress(
+            GroupId=sg_ec2_id,
             IpPermissions=[
                 {
                     'IpProtocol': 'tcp',
                     'FromPort': 80,
                     'ToPort': 80,
-                    'IpRanges': [
-                        {
-                            'CidrIp': '0.0.0.0/0',
-                            'Description': 'HTTP from Internet'
-                        }
-                    ]
-                },
-                {
-                    'IpProtocol': 'tcp',
-                    'FromPort': 443,
-                    'ToPort': 443,
-                    'IpRanges': [
-                        {
-                            'CidrIp': '0.0.0.0/0',
-                            'Description': 'HTTPS from Internet'
-                        }
-                    ]
+                    'IpRanges': [{'CidrIp': '0.0.0.0/0', 'Description': 'HTTP desde Internet'}]
                 },
                 {
                     'IpProtocol': 'tcp',
                     'FromPort': 22,
                     'ToPort': 22,
-                    'IpRanges': [
-                        {
-                            'CidrIp': '0.0.0.0/0',
-                            'Description': 'SSH for administration'
-                        }
-                    ]
+                    'IpRanges': [{'CidrIp': '0.0.0.0/0', 'Description': 'SSH para administración'}]
                 }
             ]
         )
-        print("   [OK] Reglas de ingreso HTTP/HTTPS/SSH agregadas")
-    except ClientError as e:
-        if 'InvalidPermission.Duplicate' in str(e):
-            print("   [!] Las reglas de ingreso ya existen")
-        else:
-            raise
-    
-    # Security Group para RDS (Base de Datos)
-    print(f"\nCreando Security Group para Base de Datos...")
-    
-    try:
-        rds_sg = ec2_client.create_security_group(
-            GroupName=RDS_SG_NAME,
-            Description='Security Group for RDS - MySQL from EC2 only',
-            VpcId=vpc_id,
-            TagSpecifications=[
-                {
-                    'ResourceType': 'security-group',
-                    'Tags': [
-                        {'Key': 'Name', 'Value': RDS_SG_NAME},
-                        {'Key': 'Application', 'Value': 'HR-System'},
-                        {'Key': 'Environment', 'Value': 'Production'}
-                    ]
-                }
+        print(f"✓ Reglas de seguridad EC2 configuradas:")
+        print(f"  - HTTP (puerto 80) abierto a Internet (0.0.0.0/0)")
+        print(f"  - SSH (puerto 22) abierto para administración")
+        
+        # Agregar tags al Security Group
+        ec2.create_tags(
+            Resources=[sg_ec2_id],
+            Tags=[
+                {'Key': 'Name', 'Value': SG_EC2_NAME},
+                {'Key': 'Application', 'Value': 'Recursos Humanos'},
+                {'Key': 'Layer', 'Value': 'Web Server'}
             ]
         )
-        rds_sg_id = rds_sg['GroupId']
-        print(f"   [OK] Security Group RDS creado: {rds_sg_id}")
+        
     except ClientError as e:
-        if 'InvalidGroup.Duplicate' in str(e):
-            response = ec2_client.describe_security_groups(
-                Filters=[
-                    {'Name': 'group-name', 'Values': [RDS_SG_NAME]},
-                    {'Name': 'vpc-id', 'Values': [vpc_id]}
-                ]
-            )
-            rds_sg_id = response['SecurityGroups'][0]['GroupId']
-            print(f"   [!] Security Group RDS ya existe: {rds_sg_id}")
+        error_code = e.response.get('Error', {}).get('Code', '')
+        
+        # Caso 1: El Security Group con ese nombre ya existe
+        if 'InvalidGroup.Duplicate' in str(e) or error_code == 'InvalidGroup.Duplicate':
+            try:
+                response = ec2.describe_security_groups(GroupNames=[SG_EC2_NAME])
+                sg_ec2_id = response['SecurityGroups'][0]['GroupId']
+                print(f"⚠ Security Group EC2 ya existe: {sg_ec2_id}")
+            except:
+                pass
+        
+        # Caso 2: No tenemos permisos para crear/listar Security Groups
+        elif 'UnauthorizedOperation' in str(e) or error_code == 'UnauthorizedOperation':
+            print("⚠ No se tienen permisos para crear Security Groups")
+            print("  Nota: Puedes especificar un Security Group ID con:")
+            print("  export SECURITY_GROUP_EC2_ID='sg-xxxxxxxxxxxxx'")
+            sg_ec2_id = None
         else:
-            raise
-    
-    # Agregar regla de ingreso para RDS - SOLO desde EC2 Security Group
+            print(f"⚠ Error creando Security Group EC2: {e}")
+
+if sg_ec2_id is None:
+    print("✗ Error: No se pudo crear/obtener el Security Group para EC2", file=sys.stderr)
+    sys.exit(1)
+
+# ---------------------------
+# PASO 2: CREAR SECURITY GROUP PARA RDS (BASE DE DATOS)
+# ---------------------------
+print("\n[2/5] Configurando Security Group para RDS (Base de Datos)...")
+
+sg_rds_id = None  # Aquí se guardará el ID del Security Group de RDS
+
+# Si el usuario definió un SECURITY_GROUP_RDS_ID por variable de entorno, se usa directamente
+if SG_RDS_ID_ENV:
+    sg_rds_id = SG_RDS_ID_ENV
+    print(f"✓ Usando Security Group RDS especificado: {sg_rds_id}")
+else:
     try:
-        ec2_client.authorize_security_group_ingress(
-            GroupId=rds_sg_id,
+        # Obtener el VPC por defecto para asociar el Security Group
+        vpc_response = ec2.describe_vpcs(Filters=[{'Name': 'is-default', 'Values': ['true']}])
+        if vpc_response['Vpcs']:
+            vpc_id = vpc_response['Vpcs'][0]['VpcId']
+        else:
+            vpc_response = ec2.describe_vpcs()
+            vpc_id = vpc_response['Vpcs'][0]['VpcId']
+        
+        response = ec2.create_security_group(
+            GroupName=SG_RDS_NAME,
+            Description='Security Group para RDS - Solo permite MySQL desde EC2 Security Group',
+            VpcId=vpc_id
+        )
+        sg_rds_id = response['GroupId']
+        print(f"✓ Security Group RDS creado: {sg_rds_id}")
+        
+        # Se agrega regla de entrada para MySQL (3306) SOLO desde el Security Group de EC2
+        # Esto asegura que solo la instancia EC2 pueda conectarse a la base de datos
+        ec2.authorize_security_group_ingress(
+            GroupId=sg_rds_id,
             IpPermissions=[
                 {
                     'IpProtocol': 'tcp',
@@ -1102,459 +173,336 @@ def create_security_groups(ec2_client, vpc_id):
                     'ToPort': 3306,
                     'UserIdGroupPairs': [
                         {
-                            'GroupId': ec2_sg_id,
-                            'Description': 'MySQL only from Web Server'
+                            'GroupId': sg_ec2_id,
+                            'Description': 'MySQL solo desde EC2 Web Server'
                         }
                     ]
                 }
             ]
         )
-        print("   [OK] Regla de ingreso MySQL (solo desde EC2) agregada")
-        print(f"   [SECURITY] RDS solo acepta conexiones desde Security Group: {ec2_sg_id}")
-    except ClientError as e:
-        if 'InvalidPermission.Duplicate' in str(e):
-            print("   [!] La regla de ingreso ya existe")
-        else:
-            raise
-    
-    return ec2_sg_id, rds_sg_id
-
-
-def create_rds_subnet_group(rds_client, ec2_client, vpc_id):
-    """Crea un DB Subnet Group para RDS."""
-    
-    print("\nCreando DB Subnet Group...")
-    
-    # Obtener subnets del VPC
-    subnets = ec2_client.describe_subnets(
-        Filters=[{'Name': 'vpc-id', 'Values': [vpc_id]}]
-    )
-    
-    subnet_ids = [subnet['SubnetId'] for subnet in subnets['Subnets']]
-    
-    if len(subnet_ids) < 2:
-        raise Exception("Se necesitan al menos 2 subnets en diferentes AZs para RDS")
-    
-    subnet_group_name = 'hr-database-subnet-group'
-    
-    try:
-        rds_client.create_db_subnet_group(
-            DBSubnetGroupName=subnet_group_name,
-            DBSubnetGroupDescription='Subnet group for HR database',
-            SubnetIds=subnet_ids[:2],  # Usar las primeras 2 subnets
+        print(f"✓ Reglas de seguridad RDS configuradas:")
+        print(f"  - MySQL (puerto 3306) solo accesible desde SG: {sg_ec2_id}")
+        print(f"  - NO accesible directamente desde Internet")
+        
+        # Agregar tags al Security Group
+        ec2.create_tags(
+            Resources=[sg_rds_id],
             Tags=[
-                {'Key': 'Name', 'Value': subnet_group_name},
-                {'Key': 'Application', 'Value': 'HR-System'}
+                {'Key': 'Name', 'Value': SG_RDS_NAME},
+                {'Key': 'Application', 'Value': 'Recursos Humanos'},
+                {'Key': 'Layer', 'Value': 'Database'}
             ]
         )
-        print(f"   [OK] DB Subnet Group creado: {subnet_group_name}")
-    except ClientError as e:
-        if 'DBSubnetGroupAlreadyExists' in str(e):
-            print(f"   [!] DB Subnet Group ya existe: {subnet_group_name}")
-        else:
-            raise
-    
-    return subnet_group_name
-
-
-def create_rds_instance(rds_client, rds_sg_id, subnet_group_name, db_password):
-    """Crea la instancia RDS MySQL."""
-    
-    print("\n" + "="*60)
-    print("CREANDO INSTANCIA RDS")
-    print("="*60)
-    
-    print(f"\nCreando instancia RDS MySQL: {RDS_INSTANCE_NAME}")
-    print("   Este proceso puede tomar 5-10 minutos...")
-    
-    try:
-        response = rds_client.create_db_instance(
-            DBInstanceIdentifier=RDS_INSTANCE_NAME,
-            DBInstanceClass=RDS_INSTANCE_CLASS,
-            Engine=RDS_ENGINE,
-            EngineVersion=RDS_ENGINE_VERSION,
-            MasterUsername=RDS_MASTER_USERNAME,
-            MasterUserPassword=db_password,
-            DBName=RDS_DB_NAME,
-            AllocatedStorage=RDS_ALLOCATED_STORAGE,
-            VpcSecurityGroupIds=[rds_sg_id],
-            DBSubnetGroupName=subnet_group_name,
-            PubliclyAccessible=False,  # IMPORTANTE: No accesible publicamente
-            StorageType='gp2',
-            StorageEncrypted=True,  # Encriptacion en reposo
-            AutoMinorVersionUpgrade=True,
-            BackupRetentionPeriod=7,  # Backups por 7 dias
-            DeletionProtection=False,  # Cambiar a True en produccion
-            EnablePerformanceInsights=False,
-            Tags=[
-                {'Key': 'Name', 'Value': RDS_INSTANCE_NAME},
-                {'Key': 'Application', 'Value': 'HR-System'},
-                {'Key': 'Environment', 'Value': 'Production'},
-                {'Key': 'DataClassification', 'Value': 'Confidential'}
-            ]
-        )
-        print(f"   [OK] Instancia RDS creada exitosamente")
-        print(f"   [SECURITY] Encriptacion habilitada")
-        print(f"   [SECURITY] Acceso publico deshabilitado")
         
     except ClientError as e:
-        if 'DBInstanceAlreadyExists' in str(e):
-            print(f"   [!] La instancia RDS ya existe: {RDS_INSTANCE_NAME}")
+        error_code = e.response.get('Error', {}).get('Code', '')
+        
+        if 'InvalidGroup.Duplicate' in str(e) or error_code == 'InvalidGroup.Duplicate':
+            try:
+                response = ec2.describe_security_groups(GroupNames=[SG_RDS_NAME])
+                sg_rds_id = response['SecurityGroups'][0]['GroupId']
+                print(f"⚠ Security Group RDS ya existe: {sg_rds_id}")
+            except:
+                pass
+        
+        elif 'UnauthorizedOperation' in str(e) or error_code == 'UnauthorizedOperation':
+            print("⚠ No se tienen permisos para crear Security Groups")
+            print("  Nota: Puedes especificar un Security Group ID con:")
+            print("  export SECURITY_GROUP_RDS_ID='sg-xxxxxxxxxxxxx'")
+            sg_rds_id = None
         else:
-            raise
-    
-    # Esperar a que RDS este disponible
-    db_instance = wait_for_rds_available(rds_client, RDS_INSTANCE_NAME)
-    
-    return db_instance['Endpoint']['Address']
+            print(f"⚠ Error creando Security Group RDS: {e}")
 
+if sg_rds_id is None:
+    print("✗ Error: No se pudo crear/obtener el Security Group para RDS", file=sys.stderr)
+    sys.exit(1)
 
-def initialize_database(rds_endpoint, db_password):
-    """Retorna el script SQL para inicializar la base de datos."""
-    
-    return f'''
--- Script de inicializacion de la base de datos HR
+# ---------------------------
+# PASO 3: CONFIGURAR RDS CON SU SECURITY GROUP
+# ---------------------------
+print("\n[3/5] Configurando RDS (Base de Datos MySQL)...")
 
-USE {RDS_DB_NAME};
+db_endpoint = None  # Aquí se guardará el endpoint de la base de datos
 
--- Crear tabla de empleados
-CREATE TABLE IF NOT EXISTS empleados (
-    id INT AUTO_INCREMENT PRIMARY KEY,
-    nombre VARCHAR(100) NOT NULL,
-    email VARCHAR(150) UNIQUE NOT NULL,
-    salario DECIMAL(12, 2) NOT NULL,
-    departamento VARCHAR(50) NOT NULL,
-    fecha_ingreso DATE NOT NULL,
-    activo BOOLEAN DEFAULT TRUE,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-    INDEX idx_departamento (departamento),
-    INDEX idx_email (email),
-    INDEX idx_fecha_ingreso (fecha_ingreso)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+# Si el usuario dio un endpoint de RDS por variable de entorno, se usa directamente
+if RDS_ENDPOINT_ENV:
+    db_endpoint = RDS_ENDPOINT_ENV
+    print(f"✓ Usando RDS endpoint especificado: {db_endpoint}")
+else:
+    try:
+        rds.create_db_instance(
+            DBInstanceIdentifier=DB_INSTANCE_ID,
+            AllocatedStorage=20,
+            DBInstanceClass='db.t3.micro',
+            Engine='mysql',
+            EngineVersion='8.0',
+            MasterUsername=DB_USER,
+            MasterUserPassword=RDS_PASSWORD,
+            DBName=DB_NAME,
+            VpcSecurityGroupIds=[sg_rds_id],  # Asociar el Security Group de RDS
+            PubliclyAccessible=False,         # NO accesible desde Internet
+            StorageEncrypted=True,            # Encriptación en reposo
+            BackupRetentionPeriod=7,          # Retención de backups por 7 días
+            Tags=[
+                {'Key': 'Name', 'Value': DB_INSTANCE_ID},
+                {'Key': 'Application', 'Value': 'Recursos Humanos'},
+                {'Key': 'Layer', 'Value': 'Database'}
+            ]
+        )
+        print(f"✓ Instancia RDS creada: {DB_INSTANCE_ID}")
+        print(f"  - Security Group asociado: {sg_rds_id}")
+        print(f"  - Encriptación en reposo: Habilitada")
+        print(f"  - Acceso público: Deshabilitado")
+        
+        # Espera a que la instancia RDS cambie a estado 'available'
+        print("  Esperando a que RDS esté disponible (esto puede tomar varios minutos)...")
+        waiter = rds.get_waiter('db_instance_available')
+        waiter.wait(DBInstanceIdentifier=DB_INSTANCE_ID, WaiterConfig={'Delay': 30, 'MaxAttempts': 40})
+        
+        # Una vez disponible, se obtiene su endpoint
+        db_response = rds.describe_db_instances(DBInstanceIdentifier=DB_INSTANCE_ID)
+        db_endpoint = db_response['DBInstances'][0]['Endpoint']['Address']
+        print(f"✓ RDS disponible. Endpoint: {db_endpoint}")
+        
+    except ClientError as e:
+        error_code = e.response.get('Error', {}).get('Code', '')
+        
+        if error_code == 'DBInstanceAlreadyExists':
+            print(f"⚠ Instancia RDS {DB_INSTANCE_ID} ya existe")
+            try:
+                db_response = rds.describe_db_instances(DBInstanceIdentifier=DB_INSTANCE_ID)
+                db_endpoint = db_response['DBInstances'][0]['Endpoint']['Address']
+                print(f"✓ Endpoint de RDS: {db_endpoint}")
+            except Exception as e2:
+                print(f"⚠ No se pudo obtener el endpoint: {e2}")
+                print("  Usa: export RDS_ENDPOINT='tu-endpoint.rds.amazonaws.com'")
+        
+        elif 'AccessDenied' in str(e) or error_code == 'AccessDenied':
+            print("⚠ No se tienen permisos para crear RDS")
+            print("  Nota: Puedes especificar un endpoint de RDS existente con:")
+            print("  export RDS_ENDPOINT='tu-endpoint.rds.amazonaws.com'")
+            db_endpoint = None
+        else:
+            print(f"⚠ Error con RDS: {e}")
+            print("  Continuando sin RDS. Puedes especificar un endpoint con:")
+            print("  export RDS_ENDPOINT='tu-endpoint.rds.amazonaws.com'")
+            db_endpoint = None
 
--- Insertar datos de ejemplo
-INSERT INTO empleados (nombre, email, salario, departamento, fecha_ingreso) VALUES
-('Maria Garcia Lopez', 'maria.garcia@empresa.com', 65000.00, 'Tecnologia', '2022-03-15'),
-('Carlos Rodriguez Martinez', 'carlos.rodriguez@empresa.com', 55000.00, 'Recursos Humanos', '2021-08-01'),
-('Ana Martinez Perez', 'ana.martinez@empresa.com', 72000.00, 'Finanzas', '2020-01-10'),
-('Jose Lopez Garcia', 'jose.lopez@empresa.com', 48000.00, 'Marketing', '2023-02-20'),
-('Laura Sanchez Ruiz', 'laura.sanchez@empresa.com', 85000.00, 'Tecnologia', '2019-06-05');
+# Si no se tiene un endpoint válido, se usa "localhost" como placeholder
+if not db_endpoint:
+    db_endpoint = "localhost"
+    print(f"⚠ Usando placeholder para RDS endpoint. Configura manualmente después.")
 
--- Confirmar creacion
-SELECT 'Base de datos inicializada correctamente' AS mensaje;
-SELECT COUNT(*) AS total_empleados FROM empleados;
+# ---------------------------
+# PASO 4: CREAR INSTANCIA EC2 (WEB SERVER CON APACHE)
+# ---------------------------
+print("\n[4/5] Creando instancia EC2 (Web Server con Apache)...")
+
+# SCRIPT DE USER DATA PARA EC2
+user_data = f'''#!/bin/bash
+# ==============================================
+# SCRIPT DE CONFIGURACIÓN DEL WEB SERVER
+# Aplicación de Recursos Humanos
+# ==============================================
+
+# Actualizar el sistema
+yum update -y
+
+# Instalar Apache, PHP y cliente MySQL
+yum install -y httpd php php-cli php-fpm php-common php-mysqlnd mariadb105
+
+# Habilitar y arrancar servicios
+systemctl enable --now httpd
+systemctl enable --now php-fpm
+
+# Configurar PHP-FPM para Apache
+cat > /etc/httpd/conf.d/php-fpm.conf << 'EOFPHP'
+<FilesMatch \\.php$>
+  SetHandler "proxy:unix:/run/php-fpm/www.sock|fcgi://localhost/"
+</FilesMatch>
+EOFPHP
+
+# Crear directorio para la aplicación
+mkdir -p /var/www/html
+
+# Crear archivo de configuración con variables de entorno
+cat > /var/www/.env << EOFENV
+DB_HOST={db_endpoint}
+DB_NAME={DB_NAME}
+DB_USER={DB_USER}
+DB_PASS={RDS_PASSWORD}
+APP_USER=admin
+APP_PASS=admin123
+EOFENV
+
+# Configurar permisos seguros
+chown -R apache:apache /var/www/html
+chown apache:apache /var/www/.env
+chmod 600 /var/www/.env
+
+# Crear página principal de la aplicación
+cat > /var/www/html/index.php << 'EOFINDEX'
+<?php
+echo "<h1>Aplicación de Recursos Humanos</h1>";
+echo "<p>Web Server desplegado correctamente en EC2</p>";
+echo "<p>Conexión a base de datos: RDS MySQL</p>";
+echo "<p><strong>Nota:</strong> Los archivos de la aplicación deben subirse a /var/www/html</p>";
+echo "<hr>";
+echo "<p><a href='login.php'>Ir al login</a></p>";
+?>
+EOFINDEX
+
+# Crear página de estado para verificar el despliegue
+cat > /var/www/html/health.php << 'EOFHEALTH'
+<?php
+header('Content-Type: application/json');
+$status = array(
+    'status' => 'healthy',
+    'server' => 'Apache',
+    'php_version' => phpversion(),
+    'timestamp' => date('Y-m-d H:i:s')
+);
+echo json_encode($status);
+?>
+EOFHEALTH
+
+# Reiniciar servicios para aplicar configuración
+systemctl restart httpd php-fpm
+
+# Registrar estado del despliegue
+echo "Despliegue completado - $(date)" > /var/www/html/status.txt
+echo "EC2 Web Server configurado correctamente" >> /var/www/html/status.txt
 '''
 
-
-def create_key_pair(ec2_client):
-    """Crea o recupera el key pair para EC2."""
-    import os
-    
-    print(f"\nVerificando Key Pair: {EC2_KEY_NAME}")
-    
-    # Determinar directorio de salida (mismo directorio del script)
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    key_file = os.path.join(script_dir, f"{EC2_KEY_NAME}.pem")
-    
-    try:
-        ec2_client.describe_key_pairs(KeyNames=[EC2_KEY_NAME])
-        print(f"   [OK] Key Pair ya existe en AWS: {EC2_KEY_NAME}")
-        if os.path.exists(key_file):
-            print(f"   [OK] Archivo local existe: {key_file}")
-        else:
-            print(f"   [!] ADVERTENCIA: El key pair existe en AWS pero no tienes el archivo .pem local")
-            print(f"   [!] Si necesitas acceso SSH, elimina el key pair de AWS y ejecuta de nuevo")
-        return EC2_KEY_NAME
-    except ClientError:
-        pass
-    
-    # Verificar si el archivo ya existe localmente
-    if os.path.exists(key_file):
-        try:
-            os.remove(key_file)
-            print(f"   [OK] Archivo anterior eliminado: {key_file}")
-        except PermissionError:
-            print(f"   [!] No se puede eliminar archivo existente: {key_file}")
-            print(f"   [!] Ejecuta: sudo rm {key_file}")
-            raise
-    
-    # Crear nuevo key pair
-    try:
-        response = ec2_client.create_key_pair(
-            KeyName=EC2_KEY_NAME,
-            TagSpecifications=[
-                {
-                    'ResourceType': 'key-pair',
-                    'Tags': [
-                        {'Key': 'Name', 'Value': EC2_KEY_NAME},
-                        {'Key': 'Application', 'Value': 'HR-System'}
-                    ]
-                }
-            ]
-        )
-        
-        # Guardar la clave privada con permisos correctos
-        with open(key_file, 'w') as f:
-            f.write(response['KeyMaterial'])
-        
-        # Establecer permisos 400 (solo lectura para el propietario)
-        os.chmod(key_file, 0o400)
-        
-        print(f"   [OK] Key Pair creado: {EC2_KEY_NAME}")
-        print(f"   [OK] Clave privada guardada en: {key_file}")
-        print(f"   [OK] Permisos establecidos: 400 (solo lectura)")
-        print(f"   [!] IMPORTANTE: Guarda este archivo de forma segura")
-        
-        return EC2_KEY_NAME
-        
-    except ClientError as e:
-        print(f"   [ERROR] Error al crear Key Pair: {e}")
-        raise
-    except PermissionError as e:
-        print(f"   [ERROR] Error de permisos al guardar el archivo: {e}")
-        print(f"   [!] Intenta ejecutar el script desde tu directorio home:")
-        print(f"       cd ~ && python3 {os.path.abspath(__file__)}")
-        raise
-
-
-def create_ec2_instance(ec2_client, ec2_sg_id, ami_id, key_name, user_data):
-    """Crea la instancia EC2 con Apache."""
-    
-    print("\n" + "="*60)
-    print("CREANDO INSTANCIA EC2")
-    print("="*60)
-    
-    print(f"\nLanzando instancia EC2: {EC2_INSTANCE_NAME}")
-    
-    response = ec2_client.run_instances(
-        ImageId=ami_id,
-        InstanceType=EC2_INSTANCE_TYPE,
-        KeyName=key_name,
-        SecurityGroupIds=[ec2_sg_id],
-        MinCount=1,
-        MaxCount=1,
-        UserData=user_data,
-        TagSpecifications=[
+try:
+    # Parámetros para crear la instancia EC2
+    instance_params = {
+        'ImageId': AMI_ID,
+        'MinCount': 1,
+        'MaxCount': 1,
+        'InstanceType': INSTANCE_TYPE,
+        'IamInstanceProfile': {'Name': 'LabInstanceProfile'},
+        'UserData': user_data,
+        'SecurityGroupIds': [sg_ec2_id],  # Security Group que permite HTTP
+        'TagSpecifications': [
             {
                 'ResourceType': 'instance',
                 'Tags': [
-                    {'Key': 'Name', 'Value': EC2_INSTANCE_NAME},
-                    {'Key': 'Application', 'Value': 'HR-System'},
-                    {'Key': 'Environment', 'Value': 'Production'},
-                    {'Key': 'Role', 'Value': 'WebServer'}
+                    {'Key': 'Name', 'Value': APP_NAME},
+                    {'Key': 'Application', 'Value': 'Recursos Humanos'},
+                    {'Key': 'Layer', 'Value': 'Web Server'}
                 ]
             }
-        ],
-        MetadataOptions={
-            'HttpTokens': 'required',  # Requerir IMDSv2 (mas seguro)
-            'HttpEndpoint': 'enabled'
-        },
-        BlockDeviceMappings=[
-            {
-                'DeviceName': '/dev/xvda',
-                'Ebs': {
-                    'VolumeSize': 8,
-                    'VolumeType': 'gp3',
-                    'Encrypted': True,  # Encriptacion del volumen
-                    'DeleteOnTermination': True
-                }
-            }
         ]
-    )
+    }
     
+    # Creación de la instancia EC2
+    response = ec2.run_instances(**instance_params)
     instance_id = response['Instances'][0]['InstanceId']
-    print(f"   [OK] Instancia creada: {instance_id}")
-    print(f"   [SECURITY] IMDSv2 requerido (proteccion contra SSRF)")
-    print(f"   [SECURITY] Volumen EBS encriptado")
+    print(f"✓ Instancia EC2 creada: {instance_id}")
+    print(f"  - Security Group asociado: {sg_ec2_id}")
     
-    # Esperar a que la instancia este running
-    instance = wait_for_instance_running(ec2_client, instance_id)
+    # ---------------------------
+    # ESPERAR A QUE LA INSTANCIA ESTÉ EN ESTADO 'RUNNING'
+    # ---------------------------
+    print("\n[5/5] Esperando a que la instancia EC2 esté en estado 'running'...")
     
-    return instance_id, instance.get('PublicIpAddress')
-
-
-def get_default_vpc(ec2_client):
-    """Obtiene el VPC por defecto."""
-    
-    print("\nBuscando VPC por defecto...")
-    
-    response = ec2_client.describe_vpcs(
-        Filters=[{'Name': 'isDefault', 'Values': ['true']}]
+    # Usar el waiter de AWS para esperar al estado running
+    waiter = ec2.get_waiter('instance_running')
+    waiter.wait(
+        InstanceIds=[instance_id],
+        WaiterConfig={
+            'Delay': 5,        # Verificar cada 5 segundos
+            'MaxAttempts': 60  # Máximo 60 intentos (5 minutos)
+        }
     )
     
-    if response['Vpcs']:
-        vpc_id = response['Vpcs'][0]['VpcId']
-        print(f"   [OK] VPC por defecto encontrado: {vpc_id}")
-        return vpc_id
-    else:
-        raise Exception("No se encontro VPC por defecto")
-
-
-# =============================================================================
-# FUNCION PRINCIPAL
-# =============================================================================
-
-def main():
-    """Funcion principal de despliegue."""
+    print(f"✓ Instancia EC2 en estado 'running'")
     
-    print("\n" + "="*60)
-    print("DESPLIEGUE DE APLICACION DE RECURSOS HUMANOS")
-    print("   Arquitectura de Dos Capas: EC2 + RDS")
-    print("="*60)
+    # Obtener información de la instancia
+    response = ec2.describe_instances(InstanceIds=[instance_id])
+    instance_info = response['Reservations'][0]['Instances'][0]
+    public_ip = instance_info.get('PublicIpAddress', 'N/A')
+    private_ip = instance_info.get('PrivateIpAddress', 'N/A')
     
-    # Generar contrasena segura para RDS
-    db_password = generate_secure_password()
-    print(f"\n[SECURITY] Contrasena de base de datos generada de forma segura")
+    print(f"  - IP pública: {public_ip}")
+    print(f"  - IP privada: {private_ip}")
     
-    # Inicializar clientes de AWS
-    print(f"\nConectando a AWS en region: {AWS_REGION}")
+    # Esperar un poco más para que los servicios internos arranquen
+    print("\n  Esperando a que Apache y PHP inicien (30 segundos adicionales)...")
+    time.sleep(30)
+    print("✓ Servicios web deberían estar disponibles")
     
-    ec2_client = boto3.client('ec2', region_name=AWS_REGION)
-    rds_client = boto3.client('rds', region_name=AWS_REGION)
-    
-    try:
-        # 1. Obtener VPC por defecto
-        vpc_id = get_default_vpc(ec2_client)
-        
-        # 2. Crear Security Groups
-        ec2_sg_id, rds_sg_id = create_security_groups(ec2_client, vpc_id)
-        
-        # 3. Crear DB Subnet Group
-        subnet_group_name = create_rds_subnet_group(rds_client, ec2_client, vpc_id)
-        
-        # 4. Crear instancia RDS
-        rds_endpoint = create_rds_instance(rds_client, rds_sg_id, subnet_group_name, db_password)
-        
-        # 5. Obtener AMI
-        ami_id = get_latest_amazon_linux_ami(ec2_client)
-        
-        # 6. Crear/verificar Key Pair
-        key_name = create_key_pair(ec2_client)
-        
-        # 7. Generar User Data con configuracion de RDS
-        user_data = get_user_data_script(rds_endpoint, db_password)
-        
-        # 8. Crear instancia EC2
-        instance_id, public_ip = create_ec2_instance(
-            ec2_client, ec2_sg_id, ami_id, key_name, user_data
-        )
-        
-        # =================================================================
-        # RESUMEN FINAL
-        # =================================================================
-        
-        print("\n" + "="*60)
-        print("[OK] DESPLIEGUE COMPLETADO EXITOSAMENTE")
-        print("="*60)
-        
-        print(f"""
-RESUMEN DE RECURSOS CREADOS:
+except ClientError as e:
+    print(f"✗ Error creando instancia EC2: {e}", file=sys.stderr)
+    sys.exit(1)
 
-   EC2 Web Server:
-      - Instance ID: {instance_id}
-      - IP Publica: {public_ip}
-      - URL de la aplicacion: http://{public_ip}
-      - Security Group: {ec2_sg_id}
-   
-   RDS MySQL:
-      - Endpoint: {rds_endpoint}
-      - Database: {RDS_DB_NAME}
-      - Usuario: {RDS_MASTER_USERNAME}
-      - Security Group: {rds_sg_id}
-   
-   MEDIDAS DE SEGURIDAD IMPLEMENTADAS:
-      
-      Security Groups:
-         - EC2: Solo permite HTTP (80), HTTPS (443) y SSH (22)
-         - RDS: Solo acepta MySQL (3306) desde el SG de EC2
-      
-      Base de Datos:
-         - No accesible publicamente
-         - Encriptacion en reposo habilitada
-         - Contrasena segura generada automaticamente
-         - Backups automaticos (7 dias)
-      
-      Servidor Web:
-         - Headers de seguridad configurados
-         - PHP hardened (funciones peligrosas deshabilitadas)
-         - IMDSv2 requerido (proteccion SSRF)
-         - Volumen EBS encriptado
-      
-      Aplicacion:
-         - Proteccion contra SQL Injection (prepared statements)
-         - Proteccion contra XSS (sanitizacion de salida)
-         - Proteccion CSRF (tokens en formularios)
-         - Datos sensibles enmascarados en UI
-         - Archivo de configuracion fuera de web root
+# ---------------------------
+# RESUMEN FINAL
+# ---------------------------
+print("\n" + "=" * 60)
+print("DESPLIEGUE COMPLETADO EXITOSAMENTE")
+print("=" * 60)
 
-CREDENCIALES (GUARDAR DE FORMA SEGURA):
-   
-   Base de datos:
-   - Host: {rds_endpoint}
-   - Usuario: {RDS_MASTER_USERNAME}
-   - Contrasena: {db_password}
-   - Base de datos: {RDS_DB_NAME}
+print("\n📊 ARQUITECTURA DESPLEGADA:")
+print("-" * 40)
+print("┌─────────────────────────────────────┐")
+print("│           INTERNET                  │")
+print("└───────────────┬─────────────────────┘")
+print("                │ HTTP (80)")
+print("                ▼")
+print("┌─────────────────────────────────────┐")
+print(f"│  EC2 Web Server (Apache + PHP)      │")
+print(f"│  SG: {sg_ec2_id}            │")
+print(f"│  IP: {public_ip:<27} │")
+print("└───────────────┬─────────────────────┘")
+print("                │ MySQL (3306)")
+print("                ▼")
+print("┌─────────────────────────────────────┐")
+print(f"│  RDS MySQL Database                 │")
+print(f"│  SG: {sg_rds_id}            │")
+print(f"│  Endpoint: {db_endpoint[:25] if len(db_endpoint) > 25 else db_endpoint:<25} │")
+print("└─────────────────────────────────────┘")
 
-PROXIMOS PASOS:
+print("\n📋 RECURSOS CREADOS:")
+print("-" * 40)
+print(f"  Security Groups:")
+print(f"    - EC2 (Web): {sg_ec2_id} → HTTP abierto a Internet")
+print(f"    - RDS (DB):  {sg_rds_id} → MySQL solo desde EC2 SG")
+print(f"  Instancias:")
+print(f"    - EC2: {instance_id}")
+print(f"    - RDS: {DB_INSTANCE_ID}")
 
-   1. Esperar 2-3 minutos para que Apache termine de configurarse
-   
-   2. Acceder a la aplicacion:
-      http://{public_ip}
-   
-   3. Inicializar la base de datos conectandose por SSH:
-      ssh -i {EC2_KEY_NAME}.pem ec2-user@{public_ip}
-      
-      Luego ejecutar:
-      mysql -h {rds_endpoint} -u {RDS_MASTER_USERNAME} -p{db_password} {RDS_DB_NAME}
-      
-   4. Ejecutar el SQL de inicializacion (ver archivo init_database.sql)
+print("\n🔒 SEGURIDAD IMPLEMENTADA:")
+print("-" * 40)
+print("  ✓ RDS no accesible desde Internet (PubliclyAccessible=False)")
+print("  ✓ RDS solo acepta conexiones MySQL desde el Security Group de EC2")
+print("  ✓ Encriptación de datos en reposo habilitada en RDS")
+print("  ✓ Archivo .env con permisos 600 (solo lectura para Apache)")
 
-   5. Para produccion, considerar:
-      - Configurar HTTPS con certificado SSL
-      - Restringir SSH a IPs especificas
-      - Habilitar DeletionProtection en RDS
-      - Configurar CloudWatch para monitoreo
-      - Implementar AWS WAF
-""")
-        
-        # Guardar script de inicializacion de BD
-        init_sql = initialize_database(rds_endpoint, db_password)
-        with open('init_database.sql', 'w') as f:
-            f.write(init_sql)
-        print("   Script SQL guardado en: init_database.sql")
-        
-        # Guardar credenciales en archivo seguro
-        with open('credentials.txt', 'w') as f:
-            f.write(f"""# CREDENCIALES - MANTENER SEGURO
-# Generado: {time.strftime('%Y-%m-%d %H:%M:%S')}
+print("\n⚠ PASOS SIGUIENTES:")
+print("-" * 40)
+if db_endpoint and db_endpoint != "localhost":
+    print(f"  1. Sube los archivos de la aplicación a /var/www/html en la instancia EC2")
+    print(f"  2. Conéctate a EC2 y ejecuta init_db.sql en RDS:")
+    print(f"     ssh -i tu-key.pem ec2-user@{public_ip}")
+    print(f"     mysql -h {db_endpoint} -u {DB_USER} -p < /var/www/init_db.sql")
+    print(f"  3. Accede a la aplicación en: http://{public_ip}/")
+    print(f"  4. Verifica el estado en: http://{public_ip}/health.php")
+    print(f"  5. Usuario por defecto: admin / admin123")
+    print(f"\n  ⚠ IMPORTANTE: Cambia las contraseñas por defecto en producción")
+else:
+    print(f"  1. Configura el endpoint de RDS en /var/www/.env en la instancia EC2")
+    print(f"  2. Sube los archivos de la aplicación a /var/www/html en la instancia EC2")
+    print(f"  3. Ejecuta init_db.sql en RDS desde la instancia EC2")
+    print(f"  4. Accede a la aplicación en: http://{public_ip}/")
+    print(f"  5. Usuario por defecto: admin / admin123")
 
-[EC2]
-Instance ID: {instance_id}
-Public IP: {public_ip}
-Key Pair: {EC2_KEY_NAME}
-
-[RDS]
-Endpoint: {rds_endpoint}
-Database: {RDS_DB_NAME}
-Username: {RDS_MASTER_USERNAME}
-Password: {db_password}
-""")
-        print("   Credenciales guardadas en: credentials.txt")
-        print("   [!] IMPORTANTE: Eliminar este archivo despues de copiar las credenciales")
-        
-        return True
-        
-    except Exception as e:
-        print(f"\n[ERROR] ERROR DURANTE EL DESPLIEGUE: {e}")
-        import traceback
-        traceback.print_exc()
-        return False
-
+print("\n" + "=" * 60)
 
 if __name__ == "__main__":
     success = main()
     sys.exit(0 if success else 1)
+
 
 
