@@ -86,12 +86,12 @@ else:
         # Crear Security Group para EC2
         sg_params = {
             'GroupName': EC2_SG_NAME,#!/usr/bin/env python3
-}
 import boto3          # SDK de AWS para Python (para usar EC2, RDS, SSM, etc.)
 import os             # Para leer variables de entorno del sistema
 import sys            # Para salir con códigos de error y escribir en stderr
 import time           # Para esperas entre reintentos de SSM
 from botocore.exceptions import ClientError  # Excepción específica de errores de AWS
+}
 
 # ---------------------------
 # CONSTANTES DE CONFIGURACIÓN
@@ -644,5 +644,6 @@ print(f"  3. La instancia EC2 está configurada con SSM para administración rem
 print(f"  4. Los archivos sensibles (.env, init_db.sql) están fuera del webroot")
 print(f"  3. La instancia EC2 está configurada con SSM para administración remota")
 print(f"  4. Los archivos sensibles (.env, init_db.sql) están fuera del webroot")
+
 
 
