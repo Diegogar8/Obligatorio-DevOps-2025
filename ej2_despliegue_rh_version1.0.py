@@ -1,43 +1,13 @@
-#!/usr/bin/env python3
-
-import boto3          # SDK de AWS para Python (para usar EC2, RDS, etc.)
-import os             # Para leer variables de entorno del sistema
-import sys            # Para salir con códigos de error y escribir en stderr
-import time           # Para esperas y reintentos
-from botocore.exceptions import ClientError  # Excepción específica de errores de AWS
-
-# ---------------------------
-# CONSTANTES DE CONFIGURACIÓN
-# ---------------------------
-REGION = 'us-east-1'                       # Región de AWS donde se desplegarán los recursos
-AMI_ID = 'ami-06b21ccaeff8cd686'           # ID de la AMI utilizada para la instancia EC2
-INSTANCE_TYPE = 't2.micro'                 # Tipo de instancia EC2
-SG_EC2_NAME = 'rh-app-ec2-sg'              # Nombre del Security Group para EC2 (Web Server)
-SG_RDS_NAME = 'rh-app-rds-sg'              # Nombre del Security Group para RDS (Base de datos)
-DB_INSTANCE_ID = 'rh-app-db'               # Identificador de la instancia RDS
-DB_NAME = 'demo_db'                        # Nombre de la base de datos que se creará en RDS
-DB_USER = 'admin'                          # Usuario administrador de la base de datos
-APP_NAME = 'rh-app-web'                    # Nombre que se usará como tag de la instancia EC2
-
-# ---------------------------
-# LECTURA DE VARIABLES DE ENTORNO
-# ---------------------------
-SG_EC2_ID_ENV = os.environ.get('SECURITY_GROUP_EC2_ID')  # Si está, se usará este Security Group para EC2
-SG_RDS_ID_ENV = os.environ.get('SECURITY_GROUP_RDS_ID')  # Si está, se usará este Security Group para RDS
-RDS_ENDPOINT_ENV = os.environ.get('RDS_ENDPOINT')        # Si está, se usará este endpoint de RDS ya existente
-RDS_PASSWORD = os.environ.get('RDS_ADMIN_PASSWORD')      # Password del usuario admin de RDS
-
-# Si no se definió la variable de entorno con la contraseña, el script no puede continuar
-if not RDS_PASSWORD:
     print("Error: Debes definir la variable de entorno RDS_ADMIN_PASSWORD", file=sys.stderr)
     print("Ejemplo: export RDS_ADMIN_PASSWORD='tu_password_seguro'", file=sys.stderr)
     sys.exit(1)  # Sale con código de error 1
 
 # ---------------------------
-# CLIENTES DE AWS (EC2 y RDS)
+# CLIENTES DE AWS (EC2, RDS y SSM)
 # ---------------------------
 ec2 = boto3.client('ec2', region_name=REGION)  # Cliente para interactuar con EC2
 rds = boto3.client('rds', region_name=REGION)  # Cliente para interactuar con RDS
+ssm = boto3.client('ssm', region_name=REGION)  # Cliente para interactuar con SSM
 
 # Mensajes iniciales de log
 print("=" * 60)
@@ -48,7 +18,7 @@ print("=" * 60)
 # ---------------------------
 # PASO 1: CREAR SECURITY GROUP PARA EC2 (WEB SERVER)
 # ---------------------------
-print("\n[1/5] Configurando Security Group para EC2 (Web Server)...")
+print("\n[1/7] Configurando Security Group para EC2 (Web Server)...")
 
 sg_ec2_id = None  # Aquí se guardará el ID del Security Group de EC2
 
@@ -136,7 +106,7 @@ if sg_ec2_id is None:
 # ---------------------------
 # PASO 2: CREAR SECURITY GROUP PARA RDS (BASE DE DATOS)
 # ---------------------------
-print("\n[2/5] Configurando Security Group para RDS (Base de Datos)...")
+print("\n[2/7] Configurando Security Group para RDS (Base de Datos)...")
 
 sg_rds_id = None  # Aquí se guardará el ID del Security Group de RDS
 
@@ -220,7 +190,7 @@ if sg_rds_id is None:
 # ---------------------------
 # PASO 3: CONFIGURAR RDS CON SU SECURITY GROUP
 # ---------------------------
-print("\n[3/5] Configurando RDS (Base de Datos MySQL)...")
+print("\n[3/7] Configurando RDS (Base de Datos MySQL)...")
 
 db_endpoint = None  # Aquí se guardará el endpoint de la base de datos
 
@@ -296,82 +266,13 @@ if not db_endpoint:
 # ---------------------------
 # PASO 4: CREAR INSTANCIA EC2 (WEB SERVER CON APACHE)
 # ---------------------------
-print("\n[4/5] Creando instancia EC2 (Web Server con Apache)...")
+print("\n[4/7] Creando instancia EC2 (Web Server con Apache)...")
 
-# SCRIPT DE USER DATA PARA EC2
-user_data = f'''#!/bin/bash
-# ==============================================
-# SCRIPT DE CONFIGURACIÓN DEL WEB SERVER
-# Aplicación de Recursos Humanos
-# ==============================================
-
-# Actualizar el sistema
-yum update -y
-
-# Instalar Apache, PHP y cliente MySQL
-yum install -y httpd php php-cli php-fpm php-common php-mysqlnd mariadb105
-
-# Habilitar y arrancar servicios
-systemctl enable --now httpd
-systemctl enable --now php-fpm
-
-# Configurar PHP-FPM para Apache
-cat > /etc/httpd/conf.d/php-fpm.conf << 'EOFPHP'
-<FilesMatch \\.php$>
-  SetHandler "proxy:unix:/run/php-fpm/www.sock|fcgi://localhost/"
-</FilesMatch>
-EOFPHP
-
-# Crear directorio para la aplicación
-mkdir -p /var/www/html
-
-# Crear archivo de configuración con variables de entorno
-cat > /var/www/.env << EOFENV
-DB_HOST={db_endpoint}
-DB_NAME={DB_NAME}
-DB_USER={DB_USER}
-DB_PASS={RDS_PASSWORD}
-APP_USER=admin
-APP_PASS=admin123
-EOFENV
-
-# Configurar permisos seguros
-chown -R apache:apache /var/www/html
-chown apache:apache /var/www/.env
-chmod 600 /var/www/.env
-
-# Crear página principal de la aplicación
-cat > /var/www/html/index.php << 'EOFINDEX'
-<?php
-echo "<h1>Aplicación de Recursos Humanos</h1>";
-echo "<p>Web Server desplegado correctamente en EC2</p>";
-echo "<p>Conexión a base de datos: RDS MySQL</p>";
-echo "<p><strong>Nota:</strong> Los archivos de la aplicación deben subirse a /var/www/html</p>";
-echo "<hr>";
-echo "<p><a href='login.php'>Ir al login</a></p>";
-?>
-EOFINDEX
-
-# Crear página de estado para verificar el despliegue
-cat > /var/www/html/health.php << 'EOFHEALTH'
-<?php
-header('Content-Type: application/json');
-$status = array(
-    'status' => 'healthy',
-    'server' => 'Apache',
-    'php_version' => phpversion(),
-    'timestamp' => date('Y-m-d H:i:s')
-);
-echo json_encode($status);
-?>
-EOFHEALTH
-
-# Reiniciar servicios para aplicar configuración
-systemctl restart httpd php-fpm
-
-# Registrar estado del despliegue
-echo "Despliegue completado - $(date)" > /var/www/html/status.txt
-echo "EC2 Web Server configurado correctamente" >> /var/www/html/status.txt
+# USER DATA mínimo - La configuración principal se hará via SSM
+user_data = '''#!/bin/bash
+# Script mínimo de inicialización
+# La configuración del servidor web se realizará via SSM
+echo "Instancia EC2 iniciada - $(date)" > /tmp/startup.log
 '''
 
 try:
@@ -403,21 +304,25 @@ try:
     print(f"  - Security Group asociado: {sg_ec2_id}")
     
     # ---------------------------
-    # ESPERAR A QUE LA INSTANCIA ESTÉ EN ESTADO 'RUNNING'
+    # ESPERAR A QUE LA INSTANCIA ESTÉ LISTA PARA SSM
     # ---------------------------
-    print("\n[5/5] Esperando a que la instancia EC2 esté en estado 'running'...")
+    print("\n[5/7] Esperando a que la instancia EC2 esté en estado 'running'...")
     
-    # Usar el waiter de AWS para esperar al estado running
+    # Primero esperar a que la instancia esté running
     waiter = ec2.get_waiter('instance_running')
     waiter.wait(
         InstanceIds=[instance_id],
         WaiterConfig={
-            'Delay': 5,        # Verificar cada 5 segundos
-            'MaxAttempts': 60  # Máximo 60 intentos (5 minutos)
+            'Delay': 5,
+            'MaxAttempts': 60
         }
     )
-    
     print(f"✓ Instancia EC2 en estado 'running'")
+    
+    # Esperar a que las verificaciones de estado pasen (necesario para SSM)
+    print("\n[6/7] Esperando verificaciones de estado de la instancia (instance_status_ok)...")
+    ec2.get_waiter('instance_status_ok').wait(InstanceIds=[instance_id])
+    print(f"✓ Verificaciones de estado completadas - Instancia lista para SSM")
     
     # Obtener información de la instancia
     response = ec2.describe_instances(InstanceIds=[instance_id])
@@ -428,76 +333,95 @@ try:
     print(f"  - IP pública: {public_ip}")
     print(f"  - IP privada: {private_ip}")
     
-    # Esperar un poco más para que los servicios internos arranquen
-    print("\n  Esperando a que Apache y PHP inicien (30 segundos adicionales)...")
-    time.sleep(30)
-    print("✓ Servicios web deberían estar disponibles")
+    # ---------------------------
+    # PARTE 2: ENVIAR COMANDO VIA SSM Y EXTRAER RESULTADO
+    # ---------------------------
+    print("\n[7/7] Configurando servidor web via SSM...")
+    
+    # Contenido del archivo index.html
+    index_html_content = '''<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Document</title>
+<meta http-equiv="X-UA-Compatible" content="IE=edge,chrome=1" />
+<meta name="description" content="Description">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, minimum-scale=1.0">
+<link rel="stylesheet" href="//cdn.jsdelivr.net/npm/docsify@4/lib/themes/vue.css">
+</head>
+<body>
+<div id="app"></div>
+<script>
+window.$docsify = {
+name: 'Obligatorio para DevOps',
+repo: 'https://github.com/Diegogar8/Obligatorio-DevOps-2025'
+}
+</script>
+<!-- Docsify v4 -->
+<script src="//cdn.jsdelivr.net/npm/docsify@4"></script>
+</body>
+</html>'''
+    
+    # Comando para crear el archivo index.html, instalar Apache y levantar el servidor
+    command = f'''#!/bin/bash
+# Crear directorio si no existe
+mkdir -p /var/www/html
+
+# Crear archivo index.html
+cat > /var/www/html/index.html << 'EOFHTML'
+{index_html_content}
+EOFHTML
+
+# Instalar Apache
+yum update -y
+yum install -y httpd
+
+# Configurar permisos
+chown -R apache:apache /var/www/html
+
+# Habilitar y arrancar Apache
+systemctl enable httpd
+systemctl start httpd
+
+# Verificar estado
+systemctl status httpd
+echo "Configuración completada - $(date)"
+'''
+    
+    print("  Enviando comando SSM para configurar el servidor web...")
+    
+    # Enviar comando via SSM
+    response = ssm.send_command(
+        InstanceIds=[instance_id],
+        DocumentName="AWS-RunShellScript",
+        Parameters={'commands': [command]}
+    )
+    command_id = response['Command']['CommandId']
+    print(f"  - Command ID: {command_id}")
+    
+    # Esperar resultado del comando SSM
+    print("  Esperando resultado del comando SSM...")
+    while True:
+        output = ssm.get_command_invocation(CommandId=command_id, InstanceId=instance_id)
+        if output['Status'] in ['Success', 'Failed', 'Cancelled', 'TimedOut']:
+            break
+        time.sleep(2)
+    
+    print(f"\n  Estado del comando: {output['Status']}")
+    print("\nOutput:")
+    print(output['StandardOutputContent'])
+    
+    if output['StandardErrorContent']:
+        print("\nErrores (si hay):")
+        print(output['StandardErrorContent'])
+    
+    if output['Status'] == 'Success':
+        print("✓ Servidor web configurado correctamente via SSM")
+    else:
+        print(f"⚠ El comando SSM terminó con estado: {output['Status']}")
     
 except ClientError as e:
     print(f"✗ Error creando instancia EC2: {e}", file=sys.stderr)
     sys.exit(1)
-
-# ---------------------------
-# RESUMEN FINAL
-# ---------------------------
-print("\n" + "=" * 60)
-print("DESPLIEGUE COMPLETADO EXITOSAMENTE")
-print("=" * 60)
-
-print("\n📊 ARQUITECTURA DESPLEGADA:")
-print("-" * 40)
-print("┌─────────────────────────────────────┐")
-print("│           INTERNET                  │")
-print("└───────────────┬─────────────────────┘")
-print("                │ HTTP (80)")
-print("                ▼")
-print("┌─────────────────────────────────────┐")
-print(f"│  EC2 Web Server (Apache + PHP)      │")
-print(f"│  SG: {sg_ec2_id}            │")
-print(f"│  IP: {public_ip:<27} │")
-print("└───────────────┬─────────────────────┘")
-print("                │ MySQL (3306)")
-print("                ▼")
-print("┌─────────────────────────────────────┐")
-print(f"│  RDS MySQL Database                 │")
-print(f"│  SG: {sg_rds_id}            │")
-print(f"│  Endpoint: {db_endpoint[:25] if len(db_endpoint) > 25 else db_endpoint:<25} │")
-print("└─────────────────────────────────────┘")
-
-print("\n📋 RECURSOS CREADOS:")
-print("-" * 40)
-print(f"  Security Groups:")
-print(f"    - EC2 (Web): {sg_ec2_id} → HTTP abierto a Internet")
-print(f"    - RDS (DB):  {sg_rds_id} → MySQL solo desde EC2 SG")
-print(f"  Instancias:")
-print(f"    - EC2: {instance_id}")
-print(f"    - RDS: {DB_INSTANCE_ID}")
-
-print("\n🔒 SEGURIDAD IMPLEMENTADA:")
-print("-" * 40)
-print("  ✓ RDS no accesible desde Internet (PubliclyAccessible=False)")
-print("  ✓ RDS solo acepta conexiones MySQL desde el Security Group de EC2")
-print("  ✓ Encriptación de datos en reposo habilitada en RDS")
-print("  ✓ Archivo .env con permisos 600 (solo lectura para Apache)")
-
-print("\n⚠ PASOS SIGUIENTES:")
-print("-" * 40)
-if db_endpoint and db_endpoint != "localhost":
-    print(f"  1. Sube los archivos de la aplicación a /var/www/html en la instancia EC2")
-    print(f"  2. Conéctate a EC2 y ejecuta init_db.sql en RDS:")
-    print(f"     ssh -i tu-key.pem ec2-user@{public_ip}")
-    print(f"     mysql -h {db_endpoint} -u {DB_USER} -p < /var/www/init_db.sql")
-    print(f"  3. Accede a la aplicación en: http://{public_ip}/")
-    print(f"  4. Verifica el estado en: http://{public_ip}/health.php")
-    print(f"  5. Usuario por defecto: admin / admin123")
-    print(f"\n  ⚠ IMPORTANTE: Cambia las contraseñas por defecto en producción")
-else:
-    print(f"  1. Configura el endpoint de RDS en /var/www/.env en la instancia EC2")
-    print(f"  2. Sube los archivos de la aplicación a /var/www/html en la instancia EC2")
-    print(f"  3. Ejecuta init_db.sql en RDS desde la instancia EC2")
-    print(f"  4. Accede a la aplicación en: http://{public_ip}/")
-    print(f"  5. Usuario por defecto: admin / admin123")
-
-print("\n" + "=" * 60)
 
 
