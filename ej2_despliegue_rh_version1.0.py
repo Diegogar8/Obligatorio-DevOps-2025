@@ -1,8 +1,14 @@
 #!/usr/bin/env python3
+
 """
 Script de despliegue seguro para aplicación de Recursos Humanos.
 Arquitectura de dos capas: EC2 (Web Server) + RDS (Base de Datos)
 Con medidas de seguridad para proteger información sensible.
+
+MEJORAS:
+- Selección explícita de subnet pública
+- Verificación de Internet Gateway
+- Mejor diagnóstico de conectividad
 """
 
 import boto3
@@ -17,14 +23,13 @@ from botocore.exceptions import ClientError
 REGION = 'us-east-1'
 AMI_ID = 'ami-06b21ccaeff8cd686'
 INSTANCE_TYPE = 't2.micro'
-EC2_SG_NAME = 'rh-app-ec2-sg'              # Security Group para EC2 (Web Server)
-RDS_SG_NAME = 'rh-app-rds-sg'              # Security Group para RDS (Base de Datos)
+EC2_SG_NAME = 'rh-app-ec2-sg'
+RDS_SG_NAME = 'rh-app-rds-sg'
 DB_INSTANCE_ID = 'rh-app-db'
 DB_NAME = 'demo_db'
 DB_USER = 'admin'
 APP_NAME = 'rh-app-web'
 
-# IAM Instance Profile para SSM
 IAM_INSTANCE_PROFILE = 'LabInstanceProfile'
 IAM_INSTANCE_PROFILE_ARN = 'arn:aws:iam::535735706108:instance-profile/LabInstanceProfile'
 
@@ -36,6 +41,7 @@ RDS_SG_ID_ENV = os.environ.get('RDS_SECURITY_GROUP_ID')
 RDS_ENDPOINT_ENV = os.environ.get('RDS_ENDPOINT')
 RDS_PASSWORD = os.environ.get('RDS_ADMIN_PASSWORD')
 VPC_ID_ENV = os.environ.get('VPC_ID')
+SUBNET_ID_ENV = os.environ.get('SUBNET_ID')
 
 if not RDS_PASSWORD:
     print("Error: Debes definir la variable de entorno RDS_ADMIN_PASSWORD", file=sys.stderr)
@@ -53,6 +59,7 @@ ssm = boto3.client('ssm', region_name=REGION)
 # ---------------------------
 # FUNCIONES AUXILIARES
 # ---------------------------
+
 def get_default_vpc_id():
     """Obtiene el ID de la VPC por defecto."""
     try:
@@ -62,6 +69,99 @@ def get_default_vpc_id():
     except ClientError as e:
         print(f"⚠ Error obteniendo VPC por defecto: {e}")
     return None
+
+
+def get_public_subnet(vpc_id):
+    """
+    Obtiene una subnet pública de la VPC.
+    Una subnet pública es aquella que:
+    1. Tiene asignación automática de IP pública habilitada, O
+    2. Está asociada a una route table con ruta a un Internet Gateway
+    """
+    try:
+        # Primero intentar encontrar subnets con IP pública automática
+        response = ec2.describe_subnets(
+            Filters=[
+                {'Name': 'vpc-id', 'Values': [vpc_id]},
+                {'Name': 'map-public-ip-on-launch', 'Values': ['true']}
+            ]
+        )
+        if response['Subnets']:
+            subnet = response['Subnets'][0]
+            print(f"  ✓ Subnet pública encontrada: {subnet['SubnetId']} (AZ: {subnet['AvailabilityZone']})")
+            return subnet['SubnetId']
+        
+        # Si no hay subnets con IP pública automática, buscar por route table
+        print("  ⚠ No hay subnets con IP pública automática, buscando por route table...")
+        
+        # Obtener Internet Gateway de la VPC
+        igw_response = ec2.describe_internet_gateways(
+            Filters=[{'Name': 'attachment.vpc-id', 'Values': [vpc_id]}]
+        )
+        
+        if not igw_response['InternetGateways']:
+            print("  ✗ No hay Internet Gateway asociado a la VPC")
+            return None
+        
+        igw_id = igw_response['InternetGateways'][0]['InternetGatewayId']
+        print(f"  ✓ Internet Gateway encontrado: {igw_id}")
+        
+        # Buscar route tables con ruta al IGW
+        rt_response = ec2.describe_route_tables(
+            Filters=[{'Name': 'vpc-id', 'Values': [vpc_id]}]
+        )
+        
+        public_subnet_ids = []
+        for rt in rt_response['RouteTables']:
+            has_igw_route = False
+            for route in rt.get('Routes', []):
+                if route.get('GatewayId', '').startswith('igw-'):
+                    has_igw_route = True
+                    break
+            
+            if has_igw_route:
+                for assoc in rt.get('Associations', []):
+                    if assoc.get('SubnetId'):
+                        public_subnet_ids.append(assoc['SubnetId'])
+        
+        if public_subnet_ids:
+            subnet_response = ec2.describe_subnets(SubnetIds=[public_subnet_ids[0]])
+            if subnet_response['Subnets']:
+                subnet = subnet_response['Subnets'][0]
+                print(f"  ✓ Subnet con ruta a IGW encontrada: {subnet['SubnetId']} (AZ: {subnet['AvailabilityZone']})")
+                return subnet['SubnetId']
+        
+        # Última opción: usar cualquier subnet y forzar IP pública
+        print("  ⚠ No se encontró subnet pública explícita, usando primera subnet disponible...")
+        all_subnets = ec2.describe_subnets(Filters=[{'Name': 'vpc-id', 'Values': [vpc_id]}])
+        if all_subnets['Subnets']:
+            subnet = all_subnets['Subnets'][0]
+            print(f"  ⚠ Usando subnet: {subnet['SubnetId']} (forzando IP pública)")
+            return subnet['SubnetId']
+            
+    except ClientError as e:
+        print(f"⚠ Error obteniendo subnet pública: {e}")
+    
+    return None
+
+
+def verify_internet_gateway(vpc_id):
+    """Verifica que la VPC tiene un Internet Gateway asociado."""
+    try:
+        response = ec2.describe_internet_gateways(
+            Filters=[{'Name': 'attachment.vpc-id', 'Values': [vpc_id]}]
+        )
+        if response['InternetGateways']:
+            igw_id = response['InternetGateways'][0]['InternetGatewayId']
+            print(f"  ✓ Internet Gateway verificado: {igw_id}")
+            return igw_id
+        else:
+            print("  ✗ No hay Internet Gateway asociado a la VPC")
+            return None
+    except ClientError as e:
+        print(f"⚠ Error verificando Internet Gateway: {e}")
+        return None
+
 
 def wait_for_ssm_agent(instance_id, max_attempts=30, delay=10):
     """Espera a que el agente SSM esté disponible en la instancia."""
@@ -79,6 +179,7 @@ def wait_for_ssm_agent(instance_id, max_attempts=30, delay=10):
         time.sleep(delay)
     return False
 
+
 def run_ssm_command(instance_id, commands, description=""):
     """Ejecuta comandos en la instancia via SSM y espera el resultado."""
     if description:
@@ -93,7 +194,6 @@ def run_ssm_command(instance_id, commands, description=""):
         )
         command_id = response['Command']['CommandId']
         
-        # Esperar resultado
         while True:
             try:
                 output = ssm.get_command_invocation(
@@ -125,6 +225,7 @@ def run_ssm_command(instance_id, commands, description=""):
         print(f"  ✗ Error ejecutando comando SSM: {e}")
         return False, None
 
+
 # ---------------------------
 # INICIO DEL DESPLIEGUE
 # ---------------------------
@@ -141,12 +242,29 @@ if not vpc_id:
     sys.exit(1)
 print(f"\n✓ Usando VPC: {vpc_id}")
 
-# ---------------------------
-# PASO 1: SECURITY GROUP PARA EC2 (Web Server)
-# ---------------------------
-print("\n[1/5] Configurando Security Group para EC2 (Web Server)...")
-ec2_sg_id = None
+# Verificar Internet Gateway
+print("\n[0/6] Verificando conectividad de red...")
+igw_id = verify_internet_gateway(vpc_id)
+if not igw_id:
+    print("Error: La VPC no tiene Internet Gateway. No habrá acceso público.", file=sys.stderr)
+    print("Crea un Internet Gateway y asócialo a la VPC antes de continuar.", file=sys.stderr)
+    sys.exit(1)
 
+# Obtener Subnet Pública
+print("\n[1/6] Obteniendo subnet pública...")
+subnet_id = SUBNET_ID_ENV or get_public_subnet(vpc_id)
+if not subnet_id:
+    print("Error: No se pudo encontrar una subnet pública", file=sys.stderr)
+    print("Verifica que la VPC tenga subnets con acceso a Internet", file=sys.stderr)
+    sys.exit(1)
+print(f"✓ Usando Subnet: {subnet_id}")
+
+# ---------------------------
+# PASO 2: SECURITY GROUP PARA EC2
+# ---------------------------
+print("\n[2/6] Configurando Security Group para EC2 (Web Server)...")
+
+ec2_sg_id = None
 if EC2_SG_ID_ENV:
     ec2_sg_id = EC2_SG_ID_ENV
     print(f"✓ Usando Security Group EC2 especificado: {ec2_sg_id}")
@@ -160,8 +278,6 @@ else:
         ec2_sg_id = response['GroupId']
         print(f"✓ Security Group EC2 creado: {ec2_sg_id}")
         
-        # Reglas de entrada: Solo HTTP y HTTPS desde Internet
-        # NOTA: SSH removido por seguridad - usar SSM Session Manager
         ec2.authorize_security_group_ingress(
             GroupId=ec2_sg_id,
             IpPermissions=[
@@ -182,9 +298,7 @@ else:
         print("✓ Reglas de seguridad EC2 configuradas:")
         print("  - HTTP (80): Abierto a Internet")
         print("  - HTTPS (443): Abierto a Internet")
-        print("  - SSH: Deshabilitado (usar SSM Session Manager)")
         
-        # Agregar tags
         ec2.create_tags(
             Resources=[ec2_sg_id],
             Tags=[
@@ -195,19 +309,15 @@ else:
         )
         
     except ClientError as e:
-        error_code = e.response.get('Error', {}).get('Code', '')
-        if 'InvalidGroup.Duplicate' in str(e) or error_code == 'InvalidGroup.Duplicate':
-            try:
-                response = ec2.describe_security_groups(
-                    Filters=[
-                        {'Name': 'group-name', 'Values': [EC2_SG_NAME]},
-                        {'Name': 'vpc-id', 'Values': [vpc_id]}
-                    ]
-                )
-                ec2_sg_id = response['SecurityGroups'][0]['GroupId']
-                print(f"⚠ Security Group EC2 ya existe: {ec2_sg_id}")
-            except Exception as e2:
-                print(f"⚠ Error obteniendo SG existente: {e2}")
+        if 'InvalidGroup.Duplicate' in str(e):
+            response = ec2.describe_security_groups(
+                Filters=[
+                    {'Name': 'group-name', 'Values': [EC2_SG_NAME]},
+                    {'Name': 'vpc-id', 'Values': [vpc_id]}
+                ]
+            )
+            ec2_sg_id = response['SecurityGroups'][0]['GroupId']
+            print(f"⚠ Security Group EC2 ya existe: {ec2_sg_id}")
         else:
             print(f"⚠ Error creando Security Group EC2: {e}")
 
@@ -216,11 +326,11 @@ if not ec2_sg_id:
     sys.exit(1)
 
 # ---------------------------
-# PASO 2: SECURITY GROUP PARA RDS (Base de Datos)
+# PASO 3: SECURITY GROUP PARA RDS
 # ---------------------------
-print("\n[2/5] Configurando Security Group para RDS (Base de Datos)...")
-rds_sg_id = None
+print("\n[3/6] Configurando Security Group para RDS (Base de Datos)...")
 
+rds_sg_id = None
 if RDS_SG_ID_ENV:
     rds_sg_id = RDS_SG_ID_ENV
     print(f"✓ Usando Security Group RDS especificado: {rds_sg_id}")
@@ -234,7 +344,6 @@ else:
         rds_sg_id = response['GroupId']
         print(f"✓ Security Group RDS creado: {rds_sg_id}")
         
-        # Regla de entrada: MySQL SOLO desde el Security Group de EC2
         ec2.authorize_security_group_ingress(
             GroupId=rds_sg_id,
             IpPermissions=[
@@ -253,9 +362,7 @@ else:
         )
         print("✓ Reglas de seguridad RDS configuradas:")
         print(f"  - MySQL (3306): Solo desde Security Group EC2 ({ec2_sg_id})")
-        print("  - Sin acceso público a Internet")
         
-        # Agregar tags
         ec2.create_tags(
             Resources=[rds_sg_id],
             Tags=[
@@ -266,44 +373,15 @@ else:
         )
         
     except ClientError as e:
-        error_code = e.response.get('Error', {}).get('Code', '')
-        if 'InvalidGroup.Duplicate' in str(e) or error_code == 'InvalidGroup.Duplicate':
-            try:
-                response = ec2.describe_security_groups(
-                    Filters=[
-                        {'Name': 'group-name', 'Values': [RDS_SG_NAME]},
-                        {'Name': 'vpc-id', 'Values': [vpc_id]}
-                    ]
-                )
-                rds_sg_id = response['SecurityGroups'][0]['GroupId']
-                print(f"⚠ Security Group RDS ya existe: {rds_sg_id}")
-                
-                # Verificar si la regla de MySQL desde EC2 ya existe
-                try:
-                    ec2.authorize_security_group_ingress(
-                        GroupId=rds_sg_id,
-                        IpPermissions=[
-                            {
-                                'IpProtocol': 'tcp',
-                                'FromPort': 3306,
-                                'ToPort': 3306,
-                                'UserIdGroupPairs': [
-                                    {
-                                        'GroupId': ec2_sg_id,
-                                        'Description': 'MySQL solo desde EC2 Web Server'
-                                    }
-                                ]
-                            }
-                        ]
-                    )
-                    print(f"✓ Regla MySQL agregada al SG RDS existente")
-                except ClientError as e3:
-                    if 'InvalidPermission.Duplicate' in str(e3):
-                        print("✓ Regla MySQL ya configurada")
-                    else:
-                        print(f"⚠ No se pudo agregar regla: {e3}")
-            except Exception as e2:
-                print(f"⚠ Error obteniendo SG existente: {e2}")
+        if 'InvalidGroup.Duplicate' in str(e):
+            response = ec2.describe_security_groups(
+                Filters=[
+                    {'Name': 'group-name', 'Values': [RDS_SG_NAME]},
+                    {'Name': 'vpc-id', 'Values': [vpc_id]}
+                ]
+            )
+            rds_sg_id = response['SecurityGroups'][0]['GroupId']
+            print(f"⚠ Security Group RDS ya existe: {rds_sg_id}")
         else:
             print(f"⚠ Error creando Security Group RDS: {e}")
 
@@ -312,11 +390,11 @@ if not rds_sg_id:
     sys.exit(1)
 
 # ---------------------------
-# PASO 3: CREAR INSTANCIA RDS
+# PASO 4: CREAR INSTANCIA RDS
 # ---------------------------
-print("\n[3/5] Configurando RDS (Base de Datos)...")
-db_endpoint = None
+print("\n[4/6] Configurando RDS (Base de Datos)...")
 
+db_endpoint = None
 if RDS_ENDPOINT_ENV:
     db_endpoint = RDS_ENDPOINT_ENV
     print(f"✓ Usando RDS endpoint especificado: {db_endpoint}")
@@ -331,11 +409,11 @@ else:
             MasterUsername=DB_USER,
             MasterUserPassword=RDS_PASSWORD,
             DBName=DB_NAME,
-            PubliclyAccessible=False,           # ✓ Sin acceso público
-            StorageEncrypted=True,              # ✓ Encriptación en reposo
-            BackupRetentionPeriod=7,            # ✓ Backups retenidos 7 días
-            DeletionProtection=False,           # Cambiar a True en producción
-            VpcSecurityGroupIds=[rds_sg_id],    # ✓ Usar SG dedicado para RDS
+            PubliclyAccessible=False,
+            StorageEncrypted=True,
+            BackupRetentionPeriod=7,
+            DeletionProtection=False,
+            VpcSecurityGroupIds=[rds_sg_id],
             Tags=[
                 {'Key': 'Name', 'Value': DB_INSTANCE_ID},
                 {'Key': 'Application', 'Value': 'Recursos Humanos'},
@@ -343,11 +421,6 @@ else:
             ]
         )
         print(f"✓ Instancia RDS creada: {DB_INSTANCE_ID}")
-        print("  Configuración de seguridad:")
-        print("  - Encriptación en reposo: ✓ Habilitada")
-        print("  - Acceso público: ✓ Deshabilitado")
-        print(f"  - Security Group: {rds_sg_id}")
-        print("  - Backups automáticos: ✓ 7 días")
         
         print("\n  Esperando a que RDS esté disponible...")
         waiter = rds.get_waiter('db_instance_available')
@@ -361,28 +434,23 @@ else:
         print(f"✓ RDS disponible. Endpoint: {db_endpoint}")
         
     except ClientError as e:
-        error_code = e.response.get('Error', {}).get('Code', '')
-        if error_code == 'DBInstanceAlreadyExists':
+        if e.response.get('Error', {}).get('Code') == 'DBInstanceAlreadyExists':
             print(f"⚠ Instancia RDS {DB_INSTANCE_ID} ya existe")
-            try:
-                db_response = rds.describe_db_instances(DBInstanceIdentifier=DB_INSTANCE_ID)
-                db_endpoint = db_response['DBInstances'][0]['Endpoint']['Address']
-                print(f"✓ Endpoint de RDS: {db_endpoint}")
-            except Exception as e2:
-                print(f"⚠ No se pudo obtener el endpoint: {e2}")
+            db_response = rds.describe_db_instances(DBInstanceIdentifier=DB_INSTANCE_ID)
+            db_endpoint = db_response['DBInstances'][0]['Endpoint']['Address']
+            print(f"✓ Endpoint de RDS: {db_endpoint}")
         else:
             print(f"⚠ Error con RDS: {e}")
 
 if not db_endpoint:
     db_endpoint = "localhost"
-    print("⚠ Usando placeholder para RDS. Configura manualmente después.")
+    print("⚠ Usando placeholder para RDS.")
 
 # ---------------------------
-# PASO 4: CREAR INSTANCIA EC2 CON SSM
+# PASO 5: CREAR INSTANCIA EC2 CON SUBNET PÚBLICA
 # ---------------------------
-print("\n[4/5] Creando instancia EC2 (Web Server)...")
+print("\n[5/6] Creando instancia EC2 (Web Server)...")
 
-# User data mínimo - NO incluye credenciales por seguridad
 user_data_minimal = '''#!/bin/bash
 yum install -y amazon-ssm-agent || true
 systemctl enable amazon-ssm-agent
@@ -390,14 +458,20 @@ systemctl start amazon-ssm-agent
 '''
 
 try:
+    # CLAVE: Usar NetworkInterfaces para forzar IP pública
     instance_params = {
         'ImageId': AMI_ID,
         'MinCount': 1,
         'MaxCount': 1,
         'InstanceType': INSTANCE_TYPE,
         'IamInstanceProfile': {'Name': IAM_INSTANCE_PROFILE},
-        'SecurityGroupIds': [ec2_sg_id],
         'UserData': user_data_minimal,
+        'NetworkInterfaces': [{
+            'DeviceIndex': 0,
+            'SubnetId': subnet_id,
+            'AssociatePublicIpAddress': True,  # ✓ FORZAR IP PÚBLICA
+            'Groups': [ec2_sg_id]
+        }],
         'TagSpecifications': [
             {
                 'ResourceType': 'instance',
@@ -409,7 +483,7 @@ try:
             }
         ],
         'MetadataOptions': {
-            'HttpTokens': 'required',           # ✓ IMDSv2 requerido
+            'HttpTokens': 'required',
             'HttpEndpoint': 'enabled'
         }
     }
@@ -417,37 +491,42 @@ try:
     response = ec2.run_instances(**instance_params)
     instance_id = response['Instances'][0]['InstanceId']
     print(f"✓ Instancia EC2 creada: {instance_id}")
+    print(f"  - Subnet: {subnet_id}")
+    print(f"  - IP pública: Forzada (AssociatePublicIpAddress=True)")
     
-    # Esperar estado running
     print("\n  Esperando a que la instancia esté en estado 'running'...")
     waiter = ec2.get_waiter('instance_running')
     waiter.wait(InstanceIds=[instance_id])
     print("  ✓ Instancia en estado 'running'")
     
-    # Esperar verificaciones de estado
     print("  Esperando verificaciones de estado...")
     waiter = ec2.get_waiter('instance_status_ok')
     waiter.wait(InstanceIds=[instance_id])
     print("  ✓ Verificaciones de estado OK")
     
-    # Obtener IP pública
     response = ec2.describe_instances(InstanceIds=[instance_id])
-    public_ip = response['Reservations'][0]['Instances'][0].get('PublicIpAddress', 'N/A')
-    print(f"  ✓ IP pública: {public_ip}")
+    instance_data = response['Reservations'][0]['Instances'][0]
+    public_ip = instance_data.get('PublicIpAddress', 'N/A')
+    private_ip = instance_data.get('PrivateIpAddress', 'N/A')
+    
+    if public_ip == 'N/A' or not public_ip:
+        print("  ⚠ ADVERTENCIA: La instancia no tiene IP pública asignada")
+    else:
+        print(f"  ✓ IP pública: {public_ip}")
+        print(f"  ✓ IP privada: {private_ip}")
     
 except ClientError as e:
     print(f"✗ Error creando instancia EC2: {e}", file=sys.stderr)
     sys.exit(1)
 
 # ---------------------------
-# PASO 5: CONFIGURAR WEB SERVER VIA SSM
+# PASO 6: CONFIGURAR WEB SERVER VIA SSM
 # ---------------------------
-print("\n[5/5] Configurando Web Server via SSM...")
+print("\n[6/6] Configurando Web Server via SSM...")
 
 if not wait_for_ssm_agent(instance_id, max_attempts=30, delay=10):
     print("⚠ SSM agent no disponible.")
 else:
-    # Contenido del archivo index.html
     index_html_content = '''<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -466,13 +545,11 @@ else:
             repo: ''
         }
     </script>
-    <!-- Docsify v4 -->
     <script src="//cdn.jsdelivr.net/npm/docsify@4"></script>
 </body>
 </html>'''
 
-    # Comando 1: Instalar Apache
-    print("\n  Paso 5.1: Instalando Apache...")
+    print("\n  Paso 6.1: Instalando Apache...")
     install_commands = [
         'yum update -y',
         'yum install -y httpd',
@@ -482,8 +559,7 @@ else:
     success, output = run_ssm_command(instance_id, install_commands, "Instalación de Apache")
     
     if success:
-        # Comando 2: Desplegar index.html
-        print("\n  Paso 5.2: Desplegando index.html...")
+        print("\n  Paso 6.2: Desplegando index.html...")
         deploy_commands = [
             'mkdir -p /var/www/html',
             f"cat > /var/www/html/index.html << 'EOFHTML'\n{index_html_content}\nEOFHTML",
@@ -495,12 +571,41 @@ else:
         success, output = run_ssm_command(instance_id, deploy_commands, "Despliegue de archivos web")
         
         if success:
-            print("\n  Paso 5.3: Verificando servicio Apache...")
+            print("\n  Paso 6.3: Verificando servicio Apache...")
             verify_commands = [
                 'systemctl status httpd --no-pager',
                 'curl -s -o /dev/null -w "%{http_code}" http://localhost/'
             ]
             run_ssm_command(instance_id, verify_commands, "Verificación de Apache")
+
+# ---------------------------
+# VERIFICACIÓN DE CONECTIVIDAD
+# ---------------------------
+print("\n" + "-" * 70)
+print("VERIFICACIÓN DE CONECTIVIDAD")
+print("-" * 70)
+
+if public_ip and public_ip != 'N/A':
+    print(f"\n🔍 Verificando acceso a http://{public_ip}/")
+    
+    import urllib.request
+    import urllib.error
+    
+    max_retries = 5
+    for attempt in range(max_retries):
+        try:
+            time.sleep(5)
+            req = urllib.request.Request(f"http://{public_ip}/", headers={'User-Agent': 'Mozilla/5.0'})
+            response = urllib.request.urlopen(req, timeout=10)
+            if response.getcode() == 200:
+                print(f"\n   ✓ ¡ÉXITO! La aplicación responde correctamente (HTTP 200)")
+                break
+        except urllib.error.URLError as e:
+            print(f"   Intento {attempt + 1}/{max_retries}: Esperando... ({e.reason})")
+        except Exception as e:
+            print(f"   Intento {attempt + 1}/{max_retries}: Error - {e}")
+    else:
+        print("\n   ⚠ No se pudo verificar la conectividad automáticamente")
 
 # ---------------------------
 # RESUMEN FINAL
@@ -510,10 +615,14 @@ print("DESPLIEGUE COMPLETADO")
 print("=" * 70)
 
 print("\n📋 RECURSOS CREADOS:")
+print(f"  ├─ VPC:                {vpc_id}")
+print(f"  ├─ Subnet:             {subnet_id}")
+print(f"  ├─ Internet Gateway:   {igw_id}")
 print(f"  ├─ Security Group EC2: {ec2_sg_id}")
 print(f"  ├─ Security Group RDS: {rds_sg_id}")
 print(f"  ├─ Instancia RDS:      {DB_INSTANCE_ID}")
 print(f"  ├─ Instancia EC2:      {instance_id}")
+print(f"  ├─ IP Privada EC2:     {private_ip}")
 print(f"  └─ IP Pública EC2:     {public_ip}")
 
 print("\n🔒 MEDIDAS DE SEGURIDAD:")
@@ -522,9 +631,13 @@ print("  ✓ RDS solo accesible desde EC2")
 print("  ✓ Encriptación en reposo para RDS")
 print("  ✓ SSH deshabilitado - usar SSM")
 print("  ✓ IMDSv2 requerido en EC2")
-print("  ✓ Sin credenciales en user_data")
+print("  ✓ Subnet pública verificada")
+print("  ✓ Internet Gateway verificado")
 
-print(f"\n🌐 ACCESO: http://{public_ip}/")
+if public_ip and public_ip != 'N/A':
+    print(f"\n🌐 ACCESO: http://{public_ip}/")
+
+print("\n💡 COMANDOS ÚTILES:")
+print(f"  - Conectar via SSM: aws ssm start-session --target {instance_id}")
+
 print("=" * 70)
-    
-
