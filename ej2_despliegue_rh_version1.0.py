@@ -122,6 +122,29 @@ except ClientError as e:
     else:
         raise
 
+# Agregar regla de SALIDA HTTPS (puerto 443) para SSM
+try:
+    ec2.authorize_security_group_egress(
+        GroupId=sg_id,
+        IpPermissions=[
+            {
+                "IpProtocol": "tcp",
+                "FromPort": 443,
+                "ToPort": 443,
+                "IpRanges": [{"CidrIp": "0.0.0.0/0"}]
+            }
+        ]
+    )
+    print("[+] Regla HTTPS saliente (puerto 443) agregada para SSM.")
+except ClientError as e:
+    error_code = e.response["Error"]["Code"]
+    if error_code == "InvalidPermission.Duplicate":
+        print("[*] La regla HTTPS saliente ya existe. Continuando...")
+    else:
+        # Los SGs por defecto ya permiten todo el tráfico saliente,
+        # así que este error es esperado
+        print("[*] Tráfico saliente ya permitido por defecto.")
+
 # === ASOCIAR EL SG A LA INSTANCIA EC2 (sin perder los SGs existentes) ===
 print(f"\n[*] Asociando SG {sg_id} a la instancia {instance_id}...")
 try:
@@ -518,5 +541,6 @@ else:
     print("\n>>> Para ver info de PHP:")
     print(f"    http://{EC2_public_ip}/info.php")
     print("=" * 60)
+
 
 
