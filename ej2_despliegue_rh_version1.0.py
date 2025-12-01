@@ -302,16 +302,3 @@ print("DESPLIEGUE COMPLETADO")
 print("=" * 60)
 
 
-⚠️  IMPORTANTE:
-  1. Espera 3-5 minutos para que el User Data termine de ejecutarse
-  2. Puedes verificar el progreso conectándote por SSH y ejecutando:
-     tail -f /var/log/user-data.log
-  3. Cuando veas "DEPLOY_COMPLETE" la aplicación estará lista
-
-🌐 URLs de acceso:
-  - Aplicación: http://{EC2_public_ip}/login.php
-  - Info PHP:   http://{EC2_public_ip}/info.php
-  - Index:      http://{EC2_public_ip}/index.php
-
-
-
