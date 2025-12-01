@@ -1,36 +1,35 @@
 #!/usr/bin/env python3
 
-import boto3          # SDK de AWS para Python (para usar EC2, RDS, SSM, etc.)
-import os             # Para leer variables de entorno del sistema
-import sys            # Para salir con códigos de error y escribir en stderr
-import time           # Para esperas entre reintentos de SSM
-from botocore.exceptions import ClientError  # Excepción específica de errores de AWS
+import boto3
+import os
+import sys
+import time
+from botocore.exceptions import ClientError
 
 # ---------------------------
 # CONSTANTES DE CONFIGURACIÓN
 # ---------------------------
-REGION = 'us-east-1'                       # Región de AWS donde se desplegarán los recursos
-AMI_ID = 'ami-06b21ccaeff8cd686'           # ID de la AMI utilizada para la instancia EC2 (Amazon Linux 2023)
-INSTANCE_TYPE = 't2.micro'                 # Tipo de instancia EC2
-EC2_SG_NAME = 'rh-app-ec2-sg'              # Nombre del Security Group para EC2 (Web Server)
-RDS_SG_NAME = 'rh-app-rds-sg'              # Nombre del Security Group para RDS (Base de Datos)
-DB_INSTANCE_ID = 'rh-app-db'               # Identificador de la instancia RDS
-DB_NAME = 'demo_db'                        # Nombre de la base de datos que se creará en RDS
-DB_USER = 'admin'                          # Usuario administrador de la base de datos
-APP_NAME = 'rh-app-web'                    # Nombre que se usará como tag de la instancia EC2
-APP_USER = 'admin'                         # Usuario por defecto de la aplicación
-APP_PASS = 'admin123'                      # Contraseña por defecto de la aplicación
-IAM_INSTANCE_PROFILE = 'LabInstanceProfile' # Perfil de instancia IAM para SSM
+REGION = 'us-east-1'
+AMI_ID = 'ami-06b21ccaeff8cd686'
+INSTANCE_TYPE = 't2.micro'
+SG_NAME = 'rh-app-sg'
+DB_INSTANCE_ID = 'rh-app-db'
+DB_NAME = 'demo_db'
+DB_USER = 'admin'
+APP_NAME = 'rh-app-web'
+GITHUB_REPO_URL = 'https://github.com/ORT-AII-ProgramacionDevOps/obligatorio.git'
+INSTANCE_PROFILE_ARN = 'arn:aws:iam::535735706108:instance-profile/LabInstanceProfile'
+
+APP_USER = 'admin'
+APP_PASS = 'admin123'
 
 # ---------------------------
 # LECTURA DE VARIABLES DE ENTORNO
 # ---------------------------
-EC2_SG_ID_ENV = os.environ.get('EC2_SECURITY_GROUP_ID')  # Si está, se usará este Security Group para EC2
-RDS_SG_ID_ENV = os.environ.get('RDS_SECURITY_GROUP_ID')  # Si está, se usará este Security Group para RDS
-RDS_ENDPOINT_ENV = os.environ.get('RDS_ENDPOINT')        # Si está, se usará este endpoint de RDS ya existente
-RDS_PASSWORD = os.environ.get('RDS_ADMIN_PASSWORD')      # Password del usuario admin de RDS
+SG_ID_ENV = os.environ.get('SECURITY_GROUP_ID')
+RDS_ENDPOINT_ENV = os.environ.get('RDS_ENDPOINT')
+RDS_PASSWORD = os.environ.get('RDS_ADMIN_PASSWORD')
 
-# Si no se definió la variable de entorno con la contraseña, el script no puede continuar
 if not RDS_PASSWORD:
     print("Error: Debes definir la variable de entorno RDS_ADMIN_PASSWORD", file=sys.stderr)
     print("Ejemplo: export RDS_ADMIN_PASSWORD='tu_password_seguro'", file=sys.stderr)
@@ -43,252 +42,108 @@ ec2 = boto3.client('ec2', region_name=REGION)
 rds = boto3.client('rds', region_name=REGION)
 ssm = boto3.client('ssm', region_name=REGION)
 
-# Mensajes iniciales de log
-print("=" * 60)
-print("INICIANDO DESPLIEGUE DE APLICACIÓN DE RECURSOS HUMANOS")
-print("=" * 60)
-
 # ---------------------------
-# FUNCIÓN PARA OBTENER VPC Y SUBNET POR DEFECTO (OPCIONAL)
+# FUNCIÓN AUXILIAR PARA EJECUTAR COMANDOS SSM
 # ---------------------------
-def get_default_vpc_and_subnet():
-    """Obtiene la VPC por defecto y una subnet pública (si hay permisos)"""
+def run_ssm_command(instance_id, commands, description=""):
+    """
+    Ejecuta comandos en una instancia EC2 a través de SSM y espera su finalización.
+    """
     try:
-        vpcs = ec2.describe_vpcs(Filters=[{'Name': 'isDefault', 'Values': ['true']}])
-        if vpcs['Vpcs']:
-            vpc_id = vpcs['Vpcs'][0]['VpcId']
-            subnets = ec2.describe_subnets(Filters=[{'Name': 'vpc-id', 'Values': [vpc_id]}])
-            if subnets['Subnets']:
-                subnet_ids = [s['SubnetId'] for s in subnets['Subnets']]
-                return vpc_id, subnet_ids
-    except Exception as e:
-        print(f"⚠ No se pudo obtener VPC/Subnet (permisos limitados): {str(e)[:100]}...")
-    return None, []
-
-vpc_id, subnet_ids = get_default_vpc_and_subnet()
-if vpc_id:
-    print(f"✓ VPC por defecto: {vpc_id}")
-    print(f"✓ Subnets disponibles: {len(subnet_ids)}")
-else:
-    print("⚠ VPC no especificada - Se usará la VPC por defecto de la cuenta")
-
-# ---------------------------
-# [1/5] CREACIÓN DE SECURITY GROUP PARA EC2 (WEB SERVER)
-# ---------------------------
-print("\n[1/5] Configurando Security Group para EC2 (Web Server)...")
-ec2_sg_id = None
-
-if EC2_SG_ID_ENV:
-    ec2_sg_id = EC2_SG_ID_ENV
-    print(f"✓ Usando Security Group EC2 especificado: {ec2_sg_id}")
-else:
-    try:
-        # Crear Security Group para EC2
-        sg_params = {
-            'GroupName': EC2_SG_NAME,#!/usr/bin/env python3
-import boto3          # SDK de AWS para Python (para usar EC2, RDS, SSM, etc.)
-import os             # Para leer variables de entorno del sistema
-import sys            # Para salir con códigos de error y escribir en stderr
-import time           # Para esperas entre reintentos de SSM
-from botocore.exceptions import ClientError  # Excepción específica de errores de AWS
-}
-
-# ---------------------------
-# CONSTANTES DE CONFIGURACIÓN
-# ---------------------------
-REGION = 'us-east-1'                       # Región de AWS donde se desplegarán los recursos
-AMI_ID = 'ami-06b21ccaeff8cd686'           # ID de la AMI utilizada para la instancia EC2 (Amazon Linux 2023)
-INSTANCE_TYPE = 't2.micro'                 # Tipo de instancia EC2
-EC2_SG_NAME = 'rh-app-ec2-sg'              # Nombre del Security Group para EC2 (Web Server)
-RDS_SG_NAME = 'rh-app-rds-sg'              # Nombre del Security Group para RDS (Base de Datos)
-DB_INSTANCE_ID = 'rh-app-db'               # Identificador de la instancia RDS
-DB_NAME = 'demo_db'                        # Nombre de la base de datos que se creará en RDS
-DB_USER = 'admin'                          # Usuario administrador de la base de datos
-APP_NAME = 'rh-app-web'                    # Nombre que se usará como tag de la instancia EC2
-APP_USER = 'admin'                         # Usuario por defecto de la aplicación
-APP_PASS = 'admin123'                      # Contraseña por defecto de la aplicación
-IAM_INSTANCE_PROFILE = 'LabInstanceProfile' # Perfil de instancia IAM para SSM
-
-# ---------------------------
-# LECTURA DE VARIABLES DE ENTORNO
-# ---------------------------
-EC2_SG_ID_ENV = os.environ.get('EC2_SECURITY_GROUP_ID')  # Si está, se usará este Security Group para EC2
-RDS_SG_ID_ENV = os.environ.get('RDS_SECURITY_GROUP_ID')  # Si está, se usará este Security Group para RDS
-RDS_ENDPOINT_ENV = os.environ.get('RDS_ENDPOINT')        # Si está, se usará este endpoint de RDS ya existente
-RDS_PASSWORD = os.environ.get('RDS_ADMIN_PASSWORD')      # Password del usuario admin de RDS
-
-# Si no se definió la variable de entorno con la contraseña, el script no puede continuar
-if not RDS_PASSWORD:
-    print("Error: Debes definir la variable de entorno RDS_ADMIN_PASSWORD", file=sys.stderr)
-    print("Ejemplo: export RDS_ADMIN_PASSWORD='tu_password_seguro'", file=sys.stderr)
-    sys.exit(1)
-
-# ---------------------------
-# CLIENTES DE AWS (EC2, RDS y SSM)
-# ---------------------------
-ec2 = boto3.client('ec2', region_name=REGION)
-rds = boto3.client('rds', region_name=REGION)
-ssm = boto3.client('ssm', region_name=REGION)
-
-# Mensajes iniciales de log
-print("=" * 60)
-print("INICIANDO DESPLIEGUE DE APLICACIÓN DE RECURSOS HUMANOS")
-print("=" * 60)
-
-# ---------------------------
-# VPC PREDETERMINADA (CONFIGURADA MANUALMENTE)
-# ---------------------------
-DEFAULT_VPC_ID = 'vpc-033dae0e3eda2f0a9'  # VPC predeterminada del laboratorio
-
-def get_subnets_for_vpc(vpc_id):
-    """Obtiene las subnets de una VPC específica"""
-    try:
-        subnets = ec2.describe_subnets(Filters=[{'Name': 'vpc-id', 'Values': [vpc_id]}])
-        if subnets['Subnets']:
-            subnet_ids = [s['SubnetId'] for s in subnets['Subnets']]
-            return subnet_ids
-    except Exception as e:
-        print(f"⚠ No se pudo obtener Subnets (permisos limitados): {str(e)[:100]}...")
-    return []
-
-# Usar VPC predeterminada configurada
-vpc_id = os.environ.get('VPC_ID', DEFAULT_VPC_ID)
-subnet_ids = get_subnets_for_vpc(vpc_id)
-
-print(f"✓ VPC configurada: {vpc_id}")
-if subnet_ids:
-    print(f"✓ Subnets disponibles: {len(subnet_ids)}")
-else:
-    print("⚠ No se pudieron obtener subnets - RDS usará configuración por defecto")
-
-# ---------------------------
-# [1/5] CREACIÓN DE SECURITY GROUP PARA EC2 (WEB SERVER)
-# ---------------------------
-print("\n[1/5] Configurando Security Group para EC2 (Web Server)...")
-ec2_sg_id = None
-
-if EC2_SG_ID_ENV:
-    ec2_sg_id = EC2_SG_ID_ENV
-    print(f"✓ Usando Security Group EC2 especificado: {ec2_sg_id}")
-else:
-    try:
-        # Crear Security Group para EC2
-        sg_params = {
-            'GroupName': EC2_SG_NAME,
-            'Description': 'Security Group para EC2 Web Server - Permite HTTP desde Internet'
-        }
-        # Solo agregar VpcId si está disponible
-        if vpc_id:
-            sg_params['VpcId'] = vpc_id
+        if description:
+            print(f"  Ejecutando: {description}...")
         
-        response = ec2.create_security_group(**sg_params)
-        ec2_sg_id = response['GroupId']
-        print(f"✓ Security Group EC2 creado: {ec2_sg_id}")
+        response = ssm.send_command(
+            InstanceIds=[instance_id],
+            DocumentName="AWS-RunShellScript",
+            Parameters={'commands': commands},
+            TimeoutSeconds=600
+        )
+        command_id = response['Command']['CommandId']
+        
+        max_attempts = 60
+        for attempt in range(max_attempts):
+            time.sleep(5)
+            
+            try:
+                result = ssm.get_command_invocation(
+                    CommandId=command_id,
+                    InstanceId=instance_id
+                )
+                status = result['Status']
+                
+                if status == 'Success':
+                    print(f"  ✓ Comando completado exitosamente")
+                    return True
+                elif status in ['Failed', 'Cancelled', 'TimedOut']:
+                    print(f"  ✗ Comando falló con estado: {status}")
+                    if result.get('StandardErrorContent'):
+                        print(f"    Error: {result['StandardErrorContent'][:500]}")
+                    return False
+                
+            except ClientError as e:
+                if 'InvocationDoesNotExist' in str(e):
+                    continue
+                raise
+        
+        print(f"  ⚠ Timeout esperando comando SSM")
+        return False
+        
+    except ClientError as e:
+        print(f"  ✗ Error ejecutando comando SSM: {e}")
+        return False
 
-        # Agregar regla de entrada para HTTP (80) desde cualquier IP
+# ---------------------------
+# INICIO DEL SCRIPT
+# ---------------------------
+print("=" * 60)
+print("INICIANDO DESPLIEGUE DE APLICACIÓN DE RECURSOS HUMANOS")
+print("=" * 60)
+
+print("\n[1/6] Configurando Security Group...")
+sg_id = None
+
+if SG_ID_ENV:
+    sg_id = SG_ID_ENV
+    print(f"✓ Usando Security Group especificado: {sg_id}")
+else:
+    try:
+        response = ec2.create_security_group(
+            GroupName=SG_NAME,
+            Description='Security Group para aplicación de RH - Permite HTTP, HTTPS y SSH'
+        )
+        sg_id = response['GroupId']
+        print(f"✓ Security Group creado: {sg_id}")
+        
         ec2.authorize_security_group_ingress(
-            GroupId=ec2_sg_id,
+            GroupId=sg_id,
             IpPermissions=[
-                {
-                    'IpProtocol': 'tcp',
-                    'FromPort': 80,
-                    'ToPort': 80,
-                    'IpRanges': [{'CidrIp': '0.0.0.0/0', 'Description': 'HTTP desde Internet'}]
-                },
-                {
-                    'IpProtocol': 'tcp',
-                    'FromPort': 443,
-                    'ToPort': 443,
-                    'IpRanges': [{'CidrIp': '0.0.0.0/0', 'Description': 'HTTPS desde Internet'}]
-                }
+                {'IpProtocol': 'tcp', 'FromPort': 80, 'ToPort': 80, 'IpRanges': [{'CidrIp': '0.0.0.0/0', 'Description': 'HTTP'}]},
+                {'IpProtocol': 'tcp', 'FromPort': 443, 'ToPort': 443, 'IpRanges': [{'CidrIp': '0.0.0.0/0', 'Description': 'HTTPS'}]},
+                {'IpProtocol': 'tcp', 'FromPort': 22, 'ToPort': 22, 'IpRanges': [{'CidrIp': '0.0.0.0/0', 'Description': 'SSH'}]}
             ]
         )
-        print(f"✓ Regla HTTP/HTTPS configurada para EC2")
-
-    except ClientError as e:
-        error_code = e.response.get('Error', {}).get('Code', '')
-        if 'InvalidGroup.Duplicate' in str(e) or error_code == 'InvalidGroup.Duplicate':
-            try:
-                # Buscar SG existente por nombre
-                filters = [{'Name': 'group-name', 'Values': [EC2_SG_NAME]}]
-                if vpc_id:
-                    filters.append({'Name': 'vpc-id', 'Values': [vpc_id]})
-                response = ec2.describe_security_groups(Filters=filters)
-                if response['SecurityGroups']:
-                    ec2_sg_id = response['SecurityGroups'][0]['GroupId']
-                    print(f"⚠ Security Group EC2 ya existe: {ec2_sg_id}")
-            except Exception as e2:
-                print(f"⚠ Error obteniendo SG existente: {e2}")
-        else:
-            print(f"⚠ Error creando Security Group EC2: {e}")
-
-# ---------------------------
-# [2/5] CREACIÓN DE SECURITY GROUP PARA RDS (BASE DE DATOS)
-# ---------------------------
-print("\n[2/5] Configurando Security Group para RDS (Base de Datos)...")
-rds_sg_id = None
-
-if RDS_SG_ID_ENV:
-    rds_sg_id = RDS_SG_ID_ENV
-    print(f"✓ Usando Security Group RDS especificado: {rds_sg_id}")
-else:
-    try:
-        # Crear Security Group para RDS
-        sg_params = {
-            'GroupName': RDS_SG_NAME,
-            'Description': 'Security Group para RDS - Solo permite MySQL desde EC2 SG'
-        }
-        # Solo agregar VpcId si está disponible
-        if vpc_id:
-            sg_params['VpcId'] = vpc_id
+        print(f"✓ Reglas de seguridad configuradas")
         
-        response = ec2.create_security_group(**sg_params)
-        rds_sg_id = response['GroupId']
-        print(f"✓ Security Group RDS creado: {rds_sg_id}")
-
-        # Agregar regla de entrada para MySQL (3306) SOLO desde el Security Group de EC2
-        if ec2_sg_id:
-            ec2.authorize_security_group_ingress(
-                GroupId=rds_sg_id,
-                IpPermissions=[
-                    {
-                        'IpProtocol': 'tcp',
-                        'FromPort': 3306,
-                        'ToPort': 3306,
-                        'UserIdGroupPairs': [
-                            {
-                                'GroupId': ec2_sg_id,
-                                'Description': 'MySQL solo desde EC2 Security Group'
-                            }
-                        ]
-                    }
-                ]
-            )
-            print(f"✓ Regla MySQL configurada: Solo acepta tráfico desde {ec2_sg_id}")
-        else:
-            print("⚠ No se pudo configurar regla MySQL (falta EC2 SG)")
-
     except ClientError as e:
         error_code = e.response.get('Error', {}).get('Code', '')
         if 'InvalidGroup.Duplicate' in str(e) or error_code == 'InvalidGroup.Duplicate':
             try:
-                # Buscar SG existente por nombre
-                filters = [{'Name': 'group-name', 'Values': [RDS_SG_NAME]}]
-                if vpc_id:
-                    filters.append({'Name': 'vpc-id', 'Values': [vpc_id]})
-                response = ec2.describe_security_groups(Filters=filters)
-                if response['SecurityGroups']:
-                    rds_sg_id = response['SecurityGroups'][0]['GroupId']
-                    print(f"⚠ Security Group RDS ya existe: {rds_sg_id}")
-            except Exception as e2:
-                print(f"⚠ Error obteniendo SG existente: {e2}")
-        else:
-            print(f"⚠ Error creando Security Group RDS: {e}")
+                response = ec2.describe_security_groups(GroupNames=[SG_NAME])
+                sg_id = response['SecurityGroups'][0]['GroupId']
+                print(f"⚠ Security Group ya existe: {sg_id}")
+            except:
+                pass
+        if 'UnauthorizedOperation' in str(e) or error_code == 'UnauthorizedOperation':
+            print("⚠ No se tienen permisos para crear/listar Security Groups")
+            print("  Nota: Puedes especificar un Security Group ID con:")
+            print("  export SECURITY_GROUP_ID='sg-xxxxxxxxxxxxx'")
+            sg_id = None
 
-# ---------------------------
-# [3/5] CONFIGURACIÓN DE RDS
-# ---------------------------
-print("\n[3/5] Configurando RDS...")
+if sg_id is None:
+    print("⚠ No se especificó Security Group - la instancia usará el default de la VPC")
+
+print("\n[2/6] Configurando RDS...")
 db_endpoint = None
 
 if RDS_ENDPOINT_ENV:
@@ -296,105 +151,73 @@ if RDS_ENDPOINT_ENV:
     print(f"✓ Usando RDS endpoint especificado: {db_endpoint}")
 else:
     try:
-        # Crear DB Subnet Group solo si tenemos subnets disponibles
-        db_subnet_group_name = None
-        if len(subnet_ids) >= 2:
-            db_subnet_group_name = 'rh-app-db-subnet-group'
-            try:
-                rds.create_db_subnet_group(
-                    DBSubnetGroupName=db_subnet_group_name,
-                    DBSubnetGroupDescription='Subnet group para RH App RDS',
-                    SubnetIds=subnet_ids[:2]
-                )
-                print(f"✓ DB Subnet Group creado: {db_subnet_group_name}")
-            except ClientError as e:
-                if 'DBSubnetGroupAlreadyExists' in str(e):
-                    print(f"⚠ DB Subnet Group ya existe: {db_subnet_group_name}")
-                else:
-                    print(f"⚠ Error creando DB Subnet Group: {e}")
-                    db_subnet_group_name = None
-        else:
-            print("⚠ No hay suficientes subnets - RDS usará configuración por defecto")
-
-        # Crear instancia RDS
-        create_params = {
-            'DBInstanceIdentifier': DB_INSTANCE_ID,
-            'AllocatedStorage': 20,
-            'DBInstanceClass': 'db.t3.micro',
-            'Engine': 'mysql',
-            'EngineVersion': '8.0',
-            'MasterUsername': DB_USER,
-            'MasterUserPassword': RDS_PASSWORD,
-            'DBName': DB_NAME,
-            'PubliclyAccessible': False,
-            'StorageEncrypted': True,
-            'BackupRetentionPeriod': 7,
-            'Tags': [
+        rds.create_db_instance(
+            DBInstanceIdentifier=DB_INSTANCE_ID,
+            AllocatedStorage=20,
+            DBInstanceClass='db.t3.micro',
+            Engine='mysql',
+            EngineVersion='8.0',
+            MasterUsername=DB_USER,
+            MasterUserPassword=RDS_PASSWORD,
+            DBName=DB_NAME,
+            PubliclyAccessible=False,
+            StorageEncrypted=True,
+            BackupRetentionPeriod=7,
+            Tags=[
                 {'Key': 'Name', 'Value': DB_INSTANCE_ID},
                 {'Key': 'Application', 'Value': 'Recursos Humanos'}
             ]
-        }
-        
-        # Agregar DB Subnet Group solo si fue creado
-        if db_subnet_group_name:
-            create_params['DBSubnetGroupName'] = db_subnet_group_name
-        
-        # Asociar Security Group de RDS si existe
-        if rds_sg_id:
-            create_params['VpcSecurityGroupIds'] = [rds_sg_id]
-
-        rds.create_db_instance(**create_params)
+        )
         print(f"✓ Instancia RDS creada: {DB_INSTANCE_ID}")
         print("  - Encriptación en reposo: Habilitada")
         print("  - Acceso público: Deshabilitado")
-        print(f"  - Security Group: {rds_sg_id}")
-
-        # Esperar a que la instancia RDS esté disponible
-        print("Esperando a que RDS esté disponible (esto puede tomar varios minutos)...")
+        
+        print("Esperando a que RDS esté disponible...")
         waiter = rds.get_waiter('db_instance_available')
         waiter.wait(DBInstanceIdentifier=DB_INSTANCE_ID, WaiterConfig={'Delay': 30, 'MaxAttempts': 40})
-
-        # Obtener endpoint de RDS
+        
         db_response = rds.describe_db_instances(DBInstanceIdentifier=DB_INSTANCE_ID)
         db_endpoint = db_response['DBInstances'][0]['Endpoint']['Address']
         print(f"✓ RDS disponible. Endpoint: {db_endpoint}")
-
+        
     except ClientError as e:
         error_code = e.response.get('Error', {}).get('Code', '')
+        
         if error_code == 'DBInstanceAlreadyExists':
             print(f"⚠ Instancia RDS {DB_INSTANCE_ID} ya existe")
             try:
-                db_response = rds.describe_db_instances(DBInstanceIdentifier=DB_INSTANCE_ID)
-                db_status = db_response['DBInstances'][0]['DBInstanceStatus']
-                if db_status != 'available':
-                    print(f"  Estado actual: {db_status}. Esperando...")
-                    waiter = rds.get_waiter('db_instance_available')
-                    waiter.wait(DBInstanceIdentifier=DB_INSTANCE_ID, WaiterConfig={'Delay': 30, 'MaxAttempts': 40})
                 db_response = rds.describe_db_instances(DBInstanceIdentifier=DB_INSTANCE_ID)
                 db_endpoint = db_response['DBInstances'][0]['Endpoint']['Address']
                 print(f"✓ Endpoint de RDS: {db_endpoint}")
             except Exception as e2:
                 print(f"⚠ No se pudo obtener el endpoint: {e2}")
+                print("  Usa: export RDS_ENDPOINT='tu-endpoint.rds.amazonaws.com'")
+        
+        elif 'AccessDenied' in str(e) or error_code == 'AccessDenied':
+            print("⚠ No se tienen permisos para crear RDS")
+            print("  Nota: Puedes especificar un endpoint de RDS existente con:")
+            print("  export RDS_ENDPOINT='tu-endpoint.rds.amazonaws.com'")
+            db_endpoint = None
         else:
             print(f"⚠ Error con RDS: {e}")
+            print("  Continuando sin RDS. Puedes especificar un endpoint con:")
+            print("  export RDS_ENDPOINT='tu-endpoint.rds.amazonaws.com'")
+            db_endpoint = None
 
 if not db_endpoint:
-    print("✗ Error: No se pudo obtener el endpoint de RDS. Abortando.", file=sys.stderr)
-    sys.exit(1)
+    db_endpoint = "localhost"
+    print(f"⚠ Usando placeholder para RDS endpoint. Configura manualmente después.")
 
-# ---------------------------
-# [4/5] CREACIÓN DE INSTANCIA EC2 CON SSM
-# ---------------------------
-print("\n[4/5] Creando instancia EC2...")
-
+print("\n[3/6] Creando instancia EC2...")
 try:
-    # Parámetros para crear la instancia EC2
     instance_params = {
         'ImageId': AMI_ID,
         'MinCount': 1,
         'MaxCount': 1,
         'InstanceType': INSTANCE_TYPE,
-        'IamInstanceProfile': {'Name': IAM_INSTANCE_PROFILE},  # Perfil para SSM
+        'IamInstanceProfile': {
+            'Arn': INSTANCE_PROFILE_ARN
+        },
         'TagSpecifications': [
             {
                 'ResourceType': 'instance',
@@ -405,151 +228,95 @@ try:
             }
         ]
     }
-
-    # Asociar Security Group de EC2 si existe
-    if ec2_sg_id:
-        instance_params['SecurityGroupIds'] = [ec2_sg_id]
-
-    # Crear la instancia EC2
+    
+    if sg_id:
+        instance_params['SecurityGroupIds'] = [sg_id]
+    
     response = ec2.run_instances(**instance_params)
     instance_id = response['Instances'][0]['InstanceId']
     print(f"✓ Instancia EC2 creada: {instance_id}")
-    print(f"  - IAM Instance Profile: {IAM_INSTANCE_PROFILE}")
-    print(f"  - Security Group: {ec2_sg_id}")
-
-    # Esperar a que la instancia esté en estado 'running'
+    
     print("Esperando a que la instancia esté en estado 'running'...")
     waiter = ec2.get_waiter('instance_running')
     waiter.wait(InstanceIds=[instance_id])
     print(f"✓ Instancia en estado 'running'")
-
-    # Esperar a que la instancia pase las comprobaciones de estado (instance_status_ok)
-    # Esto asegura que SSM Agent esté listo
-    print("Esperando a que la instancia pase las comprobaciones de estado...")
-    waiter = ec2.get_waiter('instance_status_ok')
-    waiter.wait(InstanceIds=[instance_id])
-    print(f"✓ Instancia pasó las comprobaciones de estado")
-
-    # Obtener IP pública
+    
+    print("Esperando a que la instancia pase los checks de estado (necesario para SSM)...")
+    waiter_status = ec2.get_waiter('instance_status_ok')
+    waiter_status.wait(InstanceIds=[instance_id])
+    print(f"✓ Instancia lista para recibir comandos SSM")
+    
     response = ec2.describe_instances(InstanceIds=[instance_id])
     public_ip = response['Reservations'][0]['Instances'][0].get('PublicIpAddress', 'N/A')
     print(f"  IP pública: {public_ip}")
-
+    
 except ClientError as e:
     print(f"✗ Error creando instancia EC2: {e}", file=sys.stderr)
     sys.exit(1)
 
 # ---------------------------
-# [5/5] CONFIGURACIÓN DEL WEB SERVER VÍA SSM
+# CONFIGURACIÓN VÍA SSM
 # ---------------------------
-print("\n[5/5] Configurando Web Server vía SSM...")
+print("\n[4/6] Configurando servidor mediante SSM...")
 
-# Función para ejecutar comandos via SSM y esperar resultado
-def run_ssm_command(instance_id, commands, description=""):
-    """Ejecuta comandos via SSM y espera el resultado"""
-    print(f"  Ejecutando: {description}...")
-    
-    # Esperar un momento para asegurar que SSM Agent esté completamente listo
-    time.sleep(10)
-    
-    max_retries = 5
-    for attempt in range(max_retries):
-        try:
-            response = ssm.send_command(
-                InstanceIds=[instance_id],
-                DocumentName="AWS-RunShellScript",
-                Parameters={'commands': commands},
-                TimeoutSeconds=600
-            )
-            command_id = response['Command']['CommandId']
-            
-            # Esperar a que el comando termine
-            while True:
-                time.sleep(5)
-                result = ssm.get_command_invocation(
-                    CommandId=command_id,
-                    InstanceId=instance_id
-                )
-                status = result['Status']
-                if status in ['Success', 'Failed', 'TimedOut', 'Cancelled']:
-                    break
-            
-            if status == 'Success':
-                print(f"    ✓ {description} - Completado")
-                return True, result.get('StandardOutputContent', '')
-            else:
-                print(f"    ✗ {description} - Falló: {result.get('StandardErrorContent', '')}")
-                return False, result.get('StandardErrorContent', '')
-                
-        except ClientError as e:
-            if 'InvalidInstanceId' in str(e) and attempt < max_retries - 1:
-                print(f"    ⚠ SSM Agent no está listo aún. Reintentando ({attempt + 1}/{max_retries})...")
-                time.sleep(30)
-            else:
-                print(f"    ✗ Error SSM: {e}")
-                return False, str(e)
-    
-    return False, "Max retries exceeded"
+print("Esperando que el agente SSM esté activo...")
+time.sleep(30)
 
-# Paso 1: Actualizar sistema e instalar paquetes
-commands_install = [
-    '#!/bin/bash',
-    'set -e',
-    '# 1) Actualiza índices y paquetes',
+# 1) Instalar git y clonar el repositorio
+print("\n  >> Instalando git y clonando repositorio...")
+clone_commands = [
+    'sudo dnf -y install git',
+    f'sudo git clone {GITHUB_REPO_URL} /tmp/obligatorio',
+    'sudo mkdir -p /var/www/html',
+    'sudo cp -r /tmp/obligatorio/* /var/www/html/ 2>/dev/null || true',
+    'sudo rm -f /var/www/html/README.md 2>/dev/null || true',
+    'sudo rm -f /var/www/html/init_db.sql 2>/dev/null || true',
+    'sudo cp /tmp/obligatorio/init_db.sql /var/www/init_db.sql 2>/dev/null || true',
+    'sudo rm -rf /tmp/obligatorio'
+]
+if not run_ssm_command(instance_id, clone_commands, "Clonando repositorio GitHub"):
+    print("⚠ Hubo problemas clonando el repositorio, continuando...")
+
+# 2) Actualizar sistema e instalar Apache + PHP
+print("\n  >> Instalando Apache y PHP...")
+install_commands = [
     'sudo dnf clean all',
     'sudo dnf makecache',
     'sudo dnf -y update',
-    '',
-    '# 2) Instala Apache + PHP 8.4 + mariadb y extensiones típicas',
-    'sudo dnf -y install httpd php php-cli php-fpm php-common php-mysqlnd mariadb105 git',
-    '',
-    '# 3) Habilita y arranca servicios',
+    'sudo dnf -y install httpd php php-cli php-fpm php-common php-mysqlnd mariadb105'
+]
+if not run_ssm_command(instance_id, install_commands, "Instalando paquetes"):
+    print("⚠ Hubo problemas instalando paquetes, continuando...")
+
+# 3) Habilitar y arrancar servicios
+print("\n  >> Habilitando servicios...")
+service_commands = [
     'sudo systemctl enable --now httpd',
-    'sudo systemctl enable --now php-fpm',
-    '',
-    '# 4) Configura PHP-FPM para Apache',
-    'echo \'<FilesMatch \\.php$>',
-    '  SetHandler "proxy:unix:/run/php-fpm/www.sock|fcgi://localhost/"',
-    '</FilesMatch>\' | sudo tee /etc/httpd/conf.d/php-fpm.conf',
-    '',
-    '# 5) Archivo de prueba',
-    'echo "<?php phpinfo(); ?>" | sudo tee /var/www/html/info.php',
-    '',
-    '# 6) Reinicia para tomar config',
-    'sudo systemctl restart httpd php-fpm'
+    'sudo systemctl enable --now php-fpm'
 ]
+if not run_ssm_command(instance_id, service_commands, "Habilitando servicios"):
+    print("⚠ Hubo problemas habilitando servicios, continuando...")
 
-success, output = run_ssm_command(instance_id, commands_install, "Instalación de Apache, PHP y MariaDB")
-if not success:
-    print("⚠ La instalación tuvo problemas, pero continuamos...")
-
-# Paso 2: Clonar repositorio
-commands_clone = [
-    '#!/bin/bash',
-    'set -e',
-    'cd /var/www/html',
-    'sudo rm -rf obligatorio 2>/dev/null || true',
-    'sudo git clone https://github.com/ORT-AII-ProgramacionDevOps/obligatorio.git',
-    '',
-    '# Mover archivos del repositorio a /var/www/html (excepto README e init_db.sql)',
-    'sudo mv obligatorio/* . 2>/dev/null || true',
-    'sudo mv obligatorio/.* . 2>/dev/null || true',
-    '',
-    '# Mover init_db.sql fuera del webroot a /var/www',
-    'sudo mv init_db.sql /var/www/ 2>/dev/null || true',
-    '',
-    '# Eliminar directorio vacío del repo',
-    'sudo rm -rf obligatorio',
-    '',
-    '# Eliminar README si existe (no debe estar en webroot)',
-    'sudo rm -f README.md README 2>/dev/null || true'
+# 4) Configurar PHP-FPM para Apache
+print("\n  >> Configurando PHP-FPM...")
+phpfpm_commands = [
+    '''echo '<FilesMatch \\.php$>
+  SetHandler "proxy:unix:/run/php-fpm/www.sock|fcgi://localhost/"
+</FilesMatch>' | sudo tee /etc/httpd/conf.d/php-fpm.conf'''
 ]
+if not run_ssm_command(instance_id, phpfpm_commands, "Configurando PHP-FPM"):
+    print("⚠ Hubo problemas configurando PHP-FPM, continuando...")
 
-success, output = run_ssm_command(instance_id, commands_clone, "Clonación del repositorio")
-if not success:
-    print("⚠ La clonación tuvo problemas, pero continuamos...")
+# 5) Crear archivo de prueba info.php
+print("\n  >> Creando archivo de prueba PHP...")
+info_commands = [
+    'echo "<?php phpinfo(); ?>" | sudo tee /var/www/html/info.php'
+]
+if not run_ssm_command(instance_id, info_commands, "Creando info.php"):
+    print("⚠ Hubo problemas creando info.php, continuando...")
 
-# Paso 3: Crear archivo .env con configuración de BD
+# 6) Crear archivo .env fuera del webroot
+print("\n  >> Creando archivo .env...")
 env_content = f'''DB_HOST={db_endpoint}
 DB_NAME={DB_NAME}
 DB_USER={DB_USER}
@@ -557,66 +324,82 @@ DB_PASS={RDS_PASSWORD}
 APP_USER={APP_USER}
 APP_PASS={APP_PASS}'''
 
-commands_env = [
-    '#!/bin/bash',
-    'set -e',
-    '',
-    '# Crear archivo .env fuera del webroot',
-    f'sudo tee /var/www/.env >/dev/null <<\'ENV\'',
-    env_content,
-    'ENV',
-    '',
-    '# Configurar permisos del .env',
+env_commands = [
+    f'''sudo tee /var/www/.env >/dev/null <<'ENV'
+{env_content}
+ENV''',
     'sudo chown apache:apache /var/www/.env',
-    'sudo chmod 600 /var/www/.env',
-    '',
-    '# Configurar permisos del webroot',
+    'sudo chmod 600 /var/www/.env'
+]
+if not run_ssm_command(instance_id, env_commands, "Creando .env"):
+    print("⚠ Hubo problemas creando .env, continuando...")
+
+# 7) Configurar permisos y reiniciar servicios
+print("\n  >> Configurando permisos y reiniciando servicios...")
+final_commands = [
     'sudo chown -R apache:apache /var/www/html',
-    '',
-    '# Reiniciar servicios',
     'sudo systemctl restart httpd php-fpm'
 ]
+if not run_ssm_command(instance_id, final_commands, "Finalizando configuración"):
+    print("⚠ Hubo problemas finalizando configuración, continuando...")
 
-success, output = run_ssm_command(instance_id, commands_env, "Configuración de archivo .env")
-if not success:
-    print("⚠ La configuración del .env tuvo problemas...")
+print("\n✓ Configuración SSM completada")
 
-# Paso 4: Ejecutar init_db.sql en RDS
-commands_init_db = [
-    '#!/bin/bash',
-    'set -e',
-    '',
-    '# Ejecutar script de inicialización de BD',
-    f'mysql -h {db_endpoint} -u {DB_USER} -p{RDS_PASSWORD} {DB_NAME} < /var/www/init_db.sql',
-    '',
-    'echo "Base de datos inicializada correctamente"'
-]
+# ---------------------------
+# CONFIGURACIÓN DE ACCESO ENTRE EC2 Y RDS
+# ---------------------------
+if db_endpoint and db_endpoint != "localhost":
+    print("\n[5/6] Configurando acceso de RDS desde EC2...")
+    try:
+        db_response = rds.describe_db_instances(DBInstanceIdentifier=DB_INSTANCE_ID)
+        db_sg_id = db_response['DBInstances'][0]['VpcSecurityGroups'][0]['VpcSecurityGroupId'] if db_response['DBInstances'][0].get('VpcSecurityGroups') else None
+        
+        if db_sg_id and sg_id:
+            try:
+                ec2_sg = boto3.resource('ec2', region_name=REGION).SecurityGroup(db_sg_id)
+                try:
+                    ec2_sg.authorize_ingress(
+                        GroupId=db_sg_id,
+                        IpPermissions=[
+                            {
+                                'IpProtocol': 'tcp',
+                                'FromPort': 3306,
+                                'ToPort': 3306,
+                                'UserIdGroupPairs': [{'GroupId': sg_id}]
+                            }
+                        ]
+                    )
+                    print(f"✓ Acceso MySQL configurado desde EC2")
+                except ClientError as e:
+                    if 'InvalidPermission.Duplicate' in str(e):
+                        print(f"⚠ Regla de acceso ya existe")
+                    else:
+                        print(f"⚠ No se pudo configurar acceso: {e}")
+            except Exception as e:
+                print(f"⚠ No se pudo configurar acceso RDS: {e}")
+        else:
+            print("⚠ No se pudo configurar acceso RDS (falta información)")
+    except Exception as e:
+        print(f"⚠ No se pudo configurar acceso RDS: {e}")
+else:
+    print("\n[5/6] Saltando configuración de acceso RDS (no hay RDS configurado)")
 
-success, output = run_ssm_command(instance_id, commands_init_db, "Inicialización de base de datos")
-if not success:
-    print("⚠ La inicialización de BD tuvo problemas (puede que ya esté inicializada)")
-
-# Paso 5: Verificación final
-commands_verify = [
-    '#!/bin/bash',
-    '',
-    'echo "=== Estado de servicios ==="',
-    'sudo systemctl status httpd --no-pager | head -5',
-    'sudo systemctl status php-fpm --no-pager | head -5',
-    '',
-    'echo "=== Archivos en /var/www/html ==="',
-    'ls -la /var/www/html/',
-    '',
-    'echo "=== Archivo .env existe ==="',
-    'ls -la /var/www/.env',
-    '',
-    'echo "=== Test de conexión a BD ==="',
-    f'mysql -h {db_endpoint} -u {DB_USER} -p{RDS_PASSWORD} -e "SHOW DATABASES;" 2>&1 | head -10'
-]
-
-success, output = run_ssm_command(instance_id, commands_verify, "Verificación final")
-if success:
-    print(f"\n  Resultado de verificación:\n{output[:500]}...")
+# ---------------------------
+# INICIALIZAR BASE DE DATOS
+# ---------------------------
+if db_endpoint and db_endpoint != "localhost":
+    print("\n[6/6] Inicializando base de datos...")
+    init_db_command = [
+        f'mysql -h {db_endpoint} -u {DB_USER} -p{RDS_PASSWORD} {DB_NAME} < /var/www/init_db.sql'
+    ]
+    if run_ssm_command(instance_id, init_db_command, "Ejecutando init_db.sql"):
+        print("✓ Base de datos inicializada correctamente")
+    else:
+        print("⚠ No se pudo inicializar la base de datos automáticamente")
+        print("  Ejecuta manualmente desde la instancia EC2:")
+        print(f"  mysql -h {db_endpoint} -u {DB_USER} -p{RDS_PASSWORD} {DB_NAME} < /var/www/init_db.sql")
+else:
+    print("\n[6/6] Saltando inicialización de BD (no hay RDS configurado)")
 
 # ---------------------------
 # RESUMEN FINAL
@@ -625,25 +408,19 @@ print("\n" + "=" * 60)
 print("DESPLIEGUE COMPLETADO")
 print("=" * 60)
 print(f"\nRecursos creados:")
-print(f"  - Security Group EC2 (Web): {ec2_sg_id}")
-print(f"  - Security Group RDS (BD):  {rds_sg_id}")
-print(f"  - Instancia RDS:            {DB_INSTANCE_ID}")
-print(f"  - Endpoint RDS:             {db_endpoint}")
-print(f"  - Instancia EC2:            {instance_id}")
-print(f"  - IP pública EC2:           {public_ip}")
-print(f"\n✓ ACCESO A LA APLICACIÓN:")
-print(f"  URL: http://{public_ip}/")
-print(f"  Login: http://{public_ip}/login.php")
-print(f"\n✓ CREDENCIALES POR DEFECTO:")
-print(f"  Usuario: {APP_USER}")
-print(f"  Contraseña: {APP_PASS}")
-print(f"\n⚠ IMPORTANTE:")
-print(f"  1. Cambia las contraseñas por defecto en producción")
-print(f"  2. El Security Group de RDS solo permite MySQL desde el SG de EC2")
-print(f"  3. La instancia EC2 está configurada con SSM para administración remota")
-print(f"  4. Los archivos sensibles (.env, init_db.sql) están fuera del webroot")
-print(f"  3. La instancia EC2 está configurada con SSM para administración remota")
-print(f"  4. Los archivos sensibles (.env, init_db.sql) están fuera del webroot")
+print(f"  - Security Group: {sg_id}")
+print(f"  - Instancia RDS: {DB_INSTANCE_ID}")
+print(f"  - Instancia EC2: {instance_id}")
+print(f"  - IP pública EC2: {public_ip}")
 
+print(f"\n⚠ IMPORTANTE:")
+if db_endpoint and db_endpoint != "localhost":
+    print(f"  1. Los archivos de la aplicación ya están en /var/www/html")
+    print(f"  2. El archivo .env está configurado en /var/www/.env")
+    print(f"  3. El archivo init_db.sql está en /var/www/init_db.sql")
+    print(f"  4. Accede a la aplicación en: http://{public_ip}/login.php")
+    print(f"  5. Prueba PHP en: http://{public_ip}/info.php")
+    print(f"  6. Usuario por defecto: {APP_USER} / {APP_PASS}")
+    print(f"  7. ¡Cambia las contraseñas por defecto en producción!")
 
 
