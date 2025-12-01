@@ -496,6 +496,5 @@ else:
     print(f"  6. Usuario por defecto: {APP_USER} / {APP_PASS}")
 
 print(f"\n📌 Nota: Si falta el favicon.ico, puedes ignorar el error o subir un archivo vacío.")
-    print(f"  4. Accede a la aplicación en: http://{public_ip}/login.php")
     print(f"  5. Usuario por defecto: admin / admin123")
 
