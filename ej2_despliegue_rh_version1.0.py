@@ -300,14 +300,7 @@ print(f"    → IP pública: {EC2_public_ip}")
 print("\n" + "=" * 60)
 print("DESPLIEGUE COMPLETADO")
 print("=" * 60)
-print(f"""
-Recursos creados:
-  - Instancia EC2: {instance_id}
-  - IP pública: {EC2_public_ip}
-  - Security Group EC2: {sg_id}
-  - Instancia RDS: {DB_INSTANCE_ID}
-  - Endpoint RDS: {endpoint}
-  - Security Group RDS: {rds_sg_id}
+
 
 ⚠️  IMPORTANTE:
   1. Espera 3-5 minutos para que el User Data termine de ejecutarse
@@ -319,5 +312,6 @@ Recursos creados:
   - Aplicación: http://{EC2_public_ip}/login.php
   - Info PHP:   http://{EC2_public_ip}/info.php
   - Index:      http://{EC2_public_ip}/index.php
+
 
 
