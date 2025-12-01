@@ -1,304 +1,260 @@
-import boto3
-import time
-import getpass
-from botocore.exceptions import ClientError
+# -------------------------------------------------------------
+# Script de automatización de infraestructura en AWS
+# -------------------------------------------------------------
+# Importa librerías necesarias
+import boto3   # SDK de AWS para Python
+import os      # Manejo de variables de entorno y archivos
+from dotenv import load_dotenv   # Carga variables desde archivo .env
 
-ec2 = boto3.client('ec2')
-rds = boto3.client("rds")
+# -------------------------------------------------------------
+# Carga las variables de entorno definidas en .env
+load_dotenv()
 
-INSTANCE_NAME = "EC2-Obligatorio-Devops"
-SG_EC2_NAME = "SG-EC2-Obligatorio"
-DB_INSTANCE_ID = "RDS-Obligatorio-Devops"
-SG_RDS_NAME = "SG-RDS-Obligatorio"
-DB_NAME = "demo_db"
-DB_USERNAME = "admin"
-DB_PASSWORD = None
+# Definición de variables globales que se leen desde .env
+# Incluyen credenciales, nombres de recursos, parámetros de EC2 y RDS, etc.
+KEY_NAME = os.getenv('KEY_NAME')
+AWS_ACCESS_KEY_ID = os.getenv('AWS_ACCESS_KEY_ID')
+AWS_SECRET_ACCESS_KEY = os.getenv('AWS_SECRET_ACCESS_KEY')
+AWS_SESSION_TOKEN = os.getenv('AWS_SESSION_TOKEN')
+AWS_REGION = os.getenv('AWS_REGION')
+AWS_IMAGE_ID = os.getenv('AWS_IMAGE_ID')
+AWS_INSTANCE_TYPE = os.getenv('AWS_INSTANCE_TYPE')
+AWS_S3_NAME = os.getenv('AWS_S3_NAME')
+AWS_EC2_NAME = os.getenv('AWS_EC2_NAME')
+SG_EC2_NAME = os.getenv('SG_EC2_NAME')
+SG_DB_NAME = os.getenv('SG_DB_NAME')
+DB_IDENTIFIER = os.getenv('DB_IDENTIFIER')
+DB_INSTANCE_CLASS = os.getenv('DB_INSTANCE_CLASS')
+DB_ENGINE = os.getenv('DB_ENGINE')
+DB_MASTER_USER_NAME = os.getenv('DB_MASTER_USER_NAME')
+DB_MASTER_PASSWORD = os.getenv('DB_MASTER_PASSWORD')
+EC2_APP_USER = os.getenv('EC2_APP_USER')
+EC2_APP_GROUP = os.getenv('EC2_APP_GROUP')
+APP_REPO_URL = os.getenv('APP_REPO_URL')
+APP_DIR = os.getenv('APP_DIR')
+APP_PORT = os.getenv('APP_PORT')
+DB_PORT = os.getenv('DB_PORT')
+DB_APP_USER = os.getenv('DB_APP_USER')
+DB_APP_PASSWORD = os.getenv('DB_APP_PASSWORD')
+DB_NAME = os.getenv('DB_APP_NAME') 
+APP_ADMIN_PASSWORD = os.getenv('APP_ADMIN_PASSWORD')
+APP_ADMIN_USER = os.getenv('APP_ADMIN_USER')
 
-PUBLIC_ZIP_URL = "https://github.com/Fabricio-Ramirez/ORTDevOps2025/releases/download/v1.0/obligatorio-main.zip"
+# -------------------------------------------------------------
+# Función para crear par de claves EC2 y guardarlo como archivo .pem
+def crear_par_claves(nombre):
+    ec2 = boto3.client('ec2')
+    key_name = nombre
+    try:
+        # Intenta crear un nuevo par de claves en AWS
+        key_pair = ec2.create_key_pair(KeyName=key_name)
+        # Si se crea correctamente, guarda la clave privada en un archivo .pem
+        with open(f'{key_name}.pem', 'w') as file:
+            file.write(key_pair['KeyMaterial'])
+        os.chmod(f'{key_name}.pem', 0o400)  # Permisos seguros (solo lectura)
+        print(f"Par de claves creado y guardado como {key_name}.pem")
+    except ec2.exceptions.ClientError as e:
+        # Si la clave ya existe, AWS devuelve el error InvalidKeyPair.Duplicate
+        if 'InvalidKeyPair.Duplicate' in str(e):
+            print(f"La clave {key_name} ya existe")
+        else:
+            # Si ocurre otro error, se relanza para no ocultarlo
+            raise
 
-print("Bienvenido al script de creación de instancia EC2 y RDS para el obligatorio de DevOps.")
+# -------------------------------------------------------------
+# Función para crear un Security Group para EC2 o RDS
+def crear_grupo_seguridad(nombre, desc):
+    ec2 = boto3.client('ec2')
+    sg_id = None
+    try:
+        # Intenta crear un nuevo Security Group
+        response = ec2.create_security_group(GroupName=nombre, Description=desc)
+        sg_id = response['GroupId']
+        print(f"Grupo de seguridad creado con el id: {sg_id}")
+    except ec2.exceptions.ClientError as e:
+        # Si el grupo ya existe, AWS devuelve InvalidGroup.Duplicate
+        if 'InvalidGroup.Duplicate' in str(e):
+            print(f"El grupo de seguridad {nombre} ya existe")
+            # En ese caso, se busca el ID del grupo existente
+            response = ec2.describe_security_groups(
+                Filters=[{'Name': 'group-name','Values': [nombre]}])
+            if response['SecurityGroups']:
+                for sg in response['SecurityGroups']:
+                    sg_id = sg['GroupId']
+                    print(f"ID del grupo de seguridad: {sg_id}")
+            else:
+                # Si no se encuentra, se informa
+                print("No se encontraron grupos de seguridad con los filtros especificados.")
+        else:
+            # Si ocurre otro error distinto, se relanza
+            raise
+    return sg_id
 
-# === BLOQUE DE RDS PRIMERO (para obtener endpoint antes del User Data) ===
-print(f"\n[1/5] Buscando RDS '{DB_INSTANCE_ID}'...")
-rds_instance = None
-endpoint = None
-
-try:
-    resp = rds.describe_db_instances(DBInstanceIdentifier=DB_INSTANCE_ID)
-    rds_instance = resp["DBInstances"][0]
-    print(f"    → Existe (estado {rds_instance['DBInstanceStatus']}).")
-    
-    # Si RDS está creándose, esperar
-    if rds_instance['DBInstanceStatus'] != 'available':
-        print("Esperando a que RDS esté disponible...")
-        rds.get_waiter("db_instance_available").wait(DBInstanceIdentifier=DB_INSTANCE_ID)
-        rds_instance = rds.describe_db_instances(DBInstanceIdentifier=DB_INSTANCE_ID)["DBInstances"][0]
-    
-    endpoint = rds_instance['Endpoint']['Address']
-    print(f"    → Endpoint: {endpoint}")
-    print("Ingrese contraseña anterior para continuar:")
-    DB_PASSWORD = getpass.getpass().strip()
-    
-except ClientError as e:
-    if e.response["Error"]["Code"] == "DBInstanceNotFound":
-        print("No existe. Creando RDS...")
-        while True:
-            DB_PASS = getpass.getpass('\nIngresa la contraseña del admin RDS (mín 8 caracteres): ').strip()
-            if not DB_PASS:
-                print('La contraseña no puede estar vacía.')
-                continue
-            if len(DB_PASS) < 8:
-                print('La contraseña debe tener al menos 8 caracteres.')
-                continue
-            break
-        
-        DB_PASSWORD = DB_PASS
-        
-        rds.create_db_instance(
-            DBName=DB_NAME,
-            DBInstanceIdentifier=DB_INSTANCE_ID,
-            AllocatedStorage=20,
-            DBInstanceClass="db.t3.micro",
-            Engine="mysql",
-            MasterUsername=DB_USERNAME,
-            MasterUserPassword=DB_PASSWORD,
-            PubliclyAccessible=False,
-            BackupRetentionPeriod=0
-        )
-        print("Esperando RDS disponible (5-10 minutos)...")
-        rds.get_waiter("db_instance_available").wait(DBInstanceIdentifier=DB_INSTANCE_ID)
-        rds_instance = rds.describe_db_instances(DBInstanceIdentifier=DB_INSTANCE_ID)["DBInstances"][0]
-        endpoint = rds_instance['Endpoint']['Address']
-        print(f"    → RDS creado. Endpoint: {endpoint}")
-    else:
-        raise
-
-# === CREAR SECURITY GROUPS ===
-print(f"\n[2/5] Configurando Security Groups...")
-
-# SG para EC2
-sg_id = None
-try:
-    response = ec2.create_security_group(
-        GroupName=SG_EC2_NAME,
-        Description="Permitir trafico web desde cualquier IP"
-    )
-    sg_id = response["GroupId"]
-    print(f"    → SG EC2 creado: {sg_id}")
-except ClientError as e:
-    if e.response["Error"]["Code"] == "InvalidGroup.Duplicate":
-        sg_id = ec2.describe_security_groups(GroupNames=[SG_EC2_NAME])["SecurityGroups"][0]["GroupId"]
-        print(f"    → SG EC2 existente: {sg_id}")
-    else:
-        raise
-
-# Regla HTTP para EC2
-try:
-    ec2.authorize_security_group_ingress(
-        GroupId=sg_id,
-        IpPermissions=[{"IpProtocol": "tcp", "FromPort": 80, "ToPort": 80, "IpRanges": [{"CidrIp": "0.0.0.0/0"}]}]
-    )
-    print("    → Regla HTTP agregada")
-except ClientError as e:
-    if e.response["Error"]["Code"] == "InvalidPermission.Duplicate":
-        print("    → Regla HTTP ya existe")
-    else:
-        raise
-
-# SG para RDS
-rds_sg_id = None
-try:
-    resp = ec2.create_security_group(
-        GroupName=SG_RDS_NAME,
-        Description="SG para RDS que permite acceso MySQL desde EC2"
-    )
-    rds_sg_id = resp["GroupId"]
-    print(f"    → SG RDS creado: {rds_sg_id}")
-except ClientError as e:
-    if e.response["Error"]["Code"] == "InvalidGroup.Duplicate":
-        rds_sg_id = ec2.describe_security_groups(GroupNames=[SG_RDS_NAME])["SecurityGroups"][0]["GroupId"]
-        print(f"    → SG RDS existente: {rds_sg_id}")
-    else:
-        raise
-
-# Regla MySQL para RDS (desde SG de EC2)
-try:
-    ec2.authorize_security_group_ingress(
-        GroupId=rds_sg_id,
+# -------------------------------------------------------------
+# Función para crear reglas de ingreso en Security Groups
+def crear_reglas(sg_id, sg_ec2_id, puerto, nombre, instancia):
+    ec2 = boto3.client('ec2')
+    if instancia == "ec2":
+        # Para EC2: abre el puerto a todo Internet
         IpPermissions=[{
-            "IpProtocol": "tcp",
-            "FromPort": 3306,
-            "ToPort": 3306,
-            "UserIdGroupPairs": [{"GroupId": sg_id}]
-        }]
-    )
-    print(f"    → Regla MySQL agregada (desde {sg_id})")
-except ClientError as e:
-    if e.response["Error"]["Code"] == "InvalidPermission.Duplicate":
-        print("    → Regla MySQL ya existe")
+            'IpProtocol': 'tcp','FromPort': puerto,'ToPort': puerto,
+            'IpRanges': [{'CidrIp': '0.0.0.0/0'}]}]
     else:
-        raise
+        # Para RDS: permite acceso solo desde el SG de la EC2
+        IpPermissions=[{
+            'IpProtocol': 'tcp','FromPort': puerto,'ToPort': puerto,
+            'UserIdGroupPairs': [{'GroupId': sg_ec2_id}]}]
+    try:
+        # Intenta agregar la regla al SG
+        ec2.authorize_security_group_ingress(GroupId=sg_id, IpPermissions=IpPermissions)
+        print(f"Regla para {nombre} creada")
+    except ec2.exceptions.ClientError as e:
+        # Si la regla ya existe, AWS devuelve InvalidPermission.Duplicate
+        if "InvalidPermission.Duplicate" in str(e):
+            print(f"La regla para {nombre} ya existe.")
+        else:
+            # Si ocurre otro error, se relanza
+            raise
 
-# Asociar SG a RDS
-try:
-    rds.modify_db_instance(
-        DBInstanceIdentifier=DB_INSTANCE_ID,
-        VpcSecurityGroupIds=[rds_sg_id],
-        ApplyImmediately=True
+# -------------------------------------------------------------
+# Función para crear instancia RDS
+def crear_rds():
+    rds = boto3.client("rds")
+    db_identifier = DB_IDENTIFIER
+    ENGINE = DB_ENGINE 
+    USER_NAME = DB_MASTER_USER_NAME
+    DB_PASSWORD = DB_MASTER_PASSWORD
+    DB_ENDPOINT = None
+    db_existe = False
+    try:
+        # Verifica si la instancia RDS ya existe
+        response = rds.describe_db_instances(DBInstanceIdentifier=db_identifier)
+        print(f"La instancia de rds ya existe")
+        db_existe = True
+        db = response["DBInstances"][0]
+        DB_ENDPOINT = db["Endpoint"]["Address"]
+        print(f"El ENDPOINT de la base de datos es {DB_ENDPOINT}")
+    except rds.exceptions.ClientError as e:
+        # Si el error es DBInstanceNotFound, significa que no existe
+        if e.response['Error']['Code'] == 'DBInstanceNotFound':
+            db_existe = False
+        else:
+            # Si ocurre otro error, se relanza
+            raise
+    if not db_existe:
+        # Crea la instancia RDS si no existe
+        response = rds.create_db_instance(
+            DBInstanceIdentifier=db_identifier,
+            AllocatedStorage=20,
+            DBInstanceClass=DB_INSTANCE_CLASS,
+            Engine=ENGINE,
+            MasterUsername=USER_NAME,
+            MasterUserPassword=DB_PASSWORD,
+            VpcSecurityGroupIds=[sg_db_id]
+        )
+        print("Instancia rds creada")
+        print("Esperando que quede disponible ...")
+        # Espera hasta que la instancia esté en estado available
+        waiter = rds.get_waiter('db_instance_available')
+        waiter.wait(DBInstanceIdentifier=db_identifier)
+        # Una vez disponible, obtiene el endpoint
+        response = rds.describe_db_instances(DBInstanceIdentifier=db_identifier)
+        db = response["DBInstances"][0]
+        DB_ENDPOINT = db["Endpoint"]["Address"]
+        print(f"El ENDPOINT de la base de datos es {DB_ENDPOINT}")
+    return DB_ENDPOINT
+
+# -------------------------------------------------------------
+# Función para crear instancia EC2
+def crear_ec2(DB_ENDPOINT):
+    ec2_resource = boto3.resource('ec2')
+    EC2_INSTANCE_ID = None
+    EC2_INSTANCE = None
+    DB_HOST = DB_ENDPOINT
+
+    # Busca si ya existe una EC2 con el mismo nombre (idempotencia)
+    instances = ec2_resource.instances.filter(
+        Filters=[
+            {"Name": "tag:Name", "Values": [AWS_EC2_NAME]},
+            {"Name": "instance-state-name","Values": ["pending","running","stopping","stopped"]}
+        ]
     )
-    print(f"    → SG {rds_sg_id} asociado a RDS")
-except ClientError as e:
-    print(f"    → Advertencia al asociar SG a RDS: {e}")
+    for instance in instances:
+        EC2_INSTANCE = instance
+        EC2_INSTANCE_ID = EC2_INSTANCE.instance_id
+        break
 
-# === USER DATA CON TODA LA CONFIGURACIÓN ===
-user_data = f"""#!/bin/bash
-exec > /var/log/user-data.log 2>&1
-set -x
+    # Carga el script de inicialización (user_data) y reemplaza variables
+    with open("user_data_socios.sh", "r") as f:
+        user_data_template = f.read()
+    user_data = (
+        user_data_template
+            .replace("__EC2_APP_USER__", EC2_APP_USER)
+            .replace("__EC2_APP_GROUP__", EC2_APP_GROUP)
+            .replace("__APP_REPO_URL__", APP_REPO_URL)
+            .replace("__APP_DIR__", APP_DIR)
+            .replace("__APP_PORT__", APP_PORT)
+            .replace("__DB_HOST__", DB_HOST) 
+            .replace("__DB_PORT__", DB_PORT) 
+            .replace("__DB_APP_USER__", DB_APP_USER) 
+            .replace("__DB_APP_PASSWORD__", DB_APP_PASSWORD) 
+            .replace("__DB_MASTER_USER__", DB_MASTER_USER_NAME)
+            .replace("__DB_MASTER_PASSWORD__", DB_MASTER_PASSWORD)
+            .replace("__APP_ADMIN_PASSWORD__", APP_ADMIN_PASSWORD)
+            .replace("__APP_ADMIN_USER__", APP_ADMIN_USER)
+            .replace("__DB_APP_NAME__", DB_NAME)
+    )
 
-echo "[USER DATA] Inicio: $(date)"
+    if not EC2_INSTANCE_ID:
+        # Si no existe una instancia previa, crea una nueva
+        instances = ec2_resource.create_instances(
+            ImageId=AWS_IMAGE_ID,
+            MinCount=1, MaxCount=1,
+            InstanceType=AWS_INSTANCE_TYPE, 
+            KeyName=KEY_NAME,
+            SecurityGroupIds=[sg_ec2_id],
+            UserData=user_data,
+            TagSpecifications=[{
+                'ResourceType': 'instance',
+                'Tags': [{'Key': 'Name','Value': AWS_EC2_NAME}]
+            }]
+        )
+        EC2_INSTANCE = instances[0]
+        EC2_INSTANCE_ID = EC2_INSTANCE.id
+        print(f"Instancia creada con ID: {EC2_INSTANCE_ID}")
+        print(f"Esperando a que la instancia quede en estado running")
 
-# 1) Actualizar sistema e instalar paquetes
-dnf clean all
-dnf makecache
-dnf update -y
-dnf install -y httpd php php-cli php-fpm php-common php-mysqlnd mariadb105 unzip curl
+        # Espera hasta que la instancia esté en estado running
+        EC2_INSTANCE.wait_until_running()
+        EC2_INSTANCE.reload()
+    else:
+        # Si ya existe, informa y recarga el estado
+        print(f"La EC2 con el nombre {AWS_EC2_NAME} ya existe y tiene el id: {EC2_INSTANCE_ID}")
+        EC2_INSTANCE.reload()
 
-# 2) Habilitar servicios
-systemctl enable --now httpd
-systemctl enable --now php-fpm
+    # Obtiene y muestra la IP pública de la instancia
+    public_ip = EC2_INSTANCE.public_ip_address
+    print(f"La IP publica de la instancia es: {public_ip}")
 
-# 3) Configurar PHP-FPM
-cat > /etc/httpd/conf.d/php-fpm.conf << 'EOFPHP'
-<FilesMatch \\.php$>
-  SetHandler "proxy:unix:/run/php-fpm/www.sock|fcgi://localhost/"
-</FilesMatch>
-EOFPHP
+# -------------------------------------------------------------
+# Bloque principal: orquesta la creación de todos los recursos
+if __name__ == "__main__":
+    # 1. Crea el par de claves para SSH (maneja duplicados)
+    crear_par_claves(KEY_NAME)
 
-# 4) Crear directorios
-mkdir -p /var/www/html
-mkdir -p /home/ec2-user/app
+    # 2. Crea los Security Groups (EC2 y RDS) o reutiliza los existentes
+    sg_ec2_id = crear_grupo_seguridad(SG_EC2_NAME, "SG de la ec2")
+    sg_db_id = crear_grupo_seguridad(SG_DB_NAME, "SG de la rds")
 
-# 5) Descargar y extraer aplicación
-cd /home/ec2-user/app
-curl -L "{PUBLIC_ZIP_URL}" -o app.zip
-unzip -o app.zip
+    # 3. Crea reglas de ingreso:
+    #    - SSH (22) y HTTP (80) abiertos a Internet para EC2
+    #    - DB (3306) accesible solo desde el SG de la EC2 para RDS
+    crear_reglas(sg_ec2_id, sg_ec2_id, 22, "SSH", "ec2")
+    crear_reglas(sg_ec2_id, sg_ec2_id, 80, "HTTP", "ec2")
+    crear_reglas(sg_db_id, sg_ec2_id, 3306, "DB", "rds")
 
-# 6) Encontrar directorio extraído y mover archivos
-REALDIR=$(find /home/ec2-user/app -maxdepth 1 -type d -name 'obligatorio-main*' | head -n1)
-if [ -n "$REALDIR" ] && [ -d "$REALDIR" ]; then
-    shopt -s dotglob nullglob
-    mv "$REALDIR"/* /var/www/html/ 2>/dev/null || true
-    shopt -u dotglob nullglob
-    echo "[OK] Archivos movidos desde $REALDIR"
-else
-    echo "[WARN] No se encontró directorio obligatorio-main*"
-fi
+    # 4. Crea la instancia RDS (si no existe) y obtiene su endpoint
+    db_endpoint = crear_rds()
 
-# 7) Mover init_db.sql fuera del webroot
-if [ -f /var/www/html/init_db.sql ]; then
-    mv /var/www/html/init_db.sql /var/www/init_db.sql
-    echo "[OK] init_db.sql movido a /var/www/"
-fi
-
-# 8) Eliminar README si existe
-rm -f /var/www/html/README.md
-
-# 9) Crear archivo .env
-cat > /var/www/.env << 'EOFENV'
-DB_HOST={endpoint}
-DB_NAME={DB_NAME}
-DB_USER={DB_USERNAME}
-DB_PASS={DB_PASSWORD}
-APP_USER=admin
-APP_PASS=admin123
-EOFENV
-
-chown apache:apache /var/www/.env
-chmod 600 /var/www/.env
-echo "[OK] .env creado"
-
-# 10) Crear archivo de prueba PHP
-echo "<?php phpinfo(); ?>" > /var/www/html/info.php
-
-# 11) Ejecutar init_db.sql contra RDS
-if [ -f /var/www/init_db.sql ]; then
-    echo "[INFO] Ejecutando init_db.sql..."
-    
-    # Esperar a que RDS esté accesible (máx 60 intentos)
-    for i in $(seq 1 60); do
-        if mysql -h {endpoint} -u {DB_USERNAME} -p'{DB_PASSWORD}' -e "SELECT 1" {DB_NAME} >/dev/null 2>&1; then
-            echo "[OK] Conexión a RDS exitosa"
-            break
-        fi
-        echo "Esperando conexión a RDS... intento $i"
-        sleep 5
-    done
-    
-    # Ejecutar SQL
-    mysql -h {endpoint} -u {DB_USERNAME} -p'{DB_PASSWORD}' {DB_NAME} < /var/www/init_db.sql 2>/tmp/mysql_err.log || true
-    
-    if [ -s /tmp/mysql_err.log ]; then
-        if grep -qi "already exists" /tmp/mysql_err.log; then
-            echo "[WARN] Tablas ya existen, continuando..."
-        else
-            echo "[WARN] Error MySQL: $(cat /tmp/mysql_err.log)"
-        fi
-    else
-        echo "[OK] init_db.sql ejecutado correctamente"
-    fi
-fi
-
-# 12) Ajustar permisos
-chown -R apache:apache /var/www/html
-
-# 13) Reiniciar servicios
-systemctl restart httpd
-systemctl restart php-fpm
-
-echo "[USER DATA] Fin: $(date)"
-echo "DEPLOY_COMPLETE" > /var/www/html/status.txt
-"""
-
-# === CREAR INSTANCIA EC2 (SIN IamInstanceProfile) ===
-print(f"\n[3/5] Creando instancia EC2...")
-
-response = ec2.run_instances(
-    ImageId='ami-06b21ccaeff8cd686',
-    MinCount=1,
-    MaxCount=1,
-    InstanceType='t2.micro',
-    SecurityGroupIds=[sg_id],
-    UserData=user_data,
-    TagSpecifications=[
-        {
-            'ResourceType': 'instance',
-            'Tags': [{'Key': 'Name', 'Value': INSTANCE_NAME}]
-        }
-    ]
-)
-
-instance_id = response['Instances'][0]['InstanceId']
-print(f"    → Instancia creada: {instance_id}")
-
-print("    → Esperando estado 'running' (2-3 minutos)...")
-ec2.get_waiter('instance_running').wait(InstanceIds=[instance_id])
-print(f"    → Instancia en estado 'running'")
-
-# Obtener IP pública
-resp = ec2.describe_instances(InstanceIds=[instance_id])
-EC2_public_ip = resp['Reservations'][0]['Instances'][0].get('PublicIpAddress')
-
-if not EC2_public_ip:
-    print("    → Esperando IP pública...")
-    time.sleep(10)
-    resp = ec2.describe_instances(InstanceIds=[instance_id])
-    EC2_public_ip = resp['Reservations'][0]['Instances'][0].get('PublicIpAddress', 'N/A')
-
-print(f"    → IP pública: {EC2_public_ip}")
-
-# === RESUMEN FINAL ===
-print("\n" + "=" * 60)
-print("DESPLIEGUE COMPLETADO")
-print("=" * 60)
-
-
+    # 5. Crea la instancia EC2 (si no existe) usando el endpoint de la DB
+    crear_ec2(db_endpoint)
