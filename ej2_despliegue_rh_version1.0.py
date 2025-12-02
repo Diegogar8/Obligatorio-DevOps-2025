@@ -185,8 +185,8 @@ try:
     resp = rds.describe_db_instances(DBInstanceIdentifier=DB_INSTANCE_ID)
     rds_instance = resp["DBInstances"][0]
     rds_exists = True
-    print(f"[+] Instancia RDS existente detectada (estado: {rds_instance['DBInstanceStatus']}).")
-    print("[*] Ingrese la misma contraseña que usó anteriormente para continuar:")
+    print(f"[+] RDS existe (estado: {rds_instance['DBInstanceStatus']}).")
+    print("[*] Ingrese la contraseña anterior para continuar:")
     DB_PASS = getpass.getpass().strip()
     DB_PASSWORD = DB_PASS
 except ClientError as e:
@@ -573,6 +573,7 @@ else:
     print("\n>>> Página de información de PHP:")
     print(f"    http://{EC2_public_ip}/info.php")
     print("=" * 60)
+
 
 
 
