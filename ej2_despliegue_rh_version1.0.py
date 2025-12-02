@@ -107,9 +107,9 @@ except ClientError as e:
     else:
         raise
 
--------------------------------------------------------------------------
+
 # Verificar y agregar la regla HTTP (puerto 80) en caso de ser necesario
--------------------------------------------------------------------------
+
 try:
     ec2.authorize_security_group_ingress(
         GroupId=sg_id,
@@ -573,6 +573,7 @@ else:
     print("\n>>> Página de información de PHP:")
     print(f"    http://{EC2_public_ip}/info.php")
     print("=" * 60)
+
 
 
 
