@@ -107,9 +107,9 @@ except ClientError as e:
     else:
         raise
 
-
+# -----------------------------------------------------------------------
 # Verificar y agregar la regla HTTP (puerto 80) en caso de ser necesario
-
+#------------------------------------------------------------------------
 try:
     ec2.authorize_security_group_ingress(
         GroupId=sg_id,
@@ -129,9 +129,9 @@ except ClientError as e:
         print("[*] La regla HTTP ya existe. Continuando...")
     else:
         raise
-------------------------------------------------------
+#------------------------------------------------------
 # Agregar regla de SALIDA HTTPS (puerto 443) para SSM
-------------------------------------------------------
+#------------------------------------------------------
 try:
     ec2.authorize_security_group_egress(
         GroupId=sg_id,
@@ -153,9 +153,9 @@ except ClientError as e:
         # Los SGs por defecto ya permiten todo el tráfico saliente,
         # así que este error es esperado
         print("[*] Tráfico saliente ya permitido por defecto.")
--------------------------------------------------------------------------
+#-------------------------------------------------------------------------
 # AÑADIR EL SG A LA INSTANCIA EC2 MANTENIENDO LOS SGs EXISTENTES
--------------------------------------------------------------------------
+#-------------------------------------------------------------------------
 print(f"\n[*] Actualizando la instancia {instance_id} para incluir el SG {sg_id}...")
 try:
     # Listar los SGs actualmente vinculados a la instancia
@@ -176,9 +176,9 @@ try:
 except ClientError as e:
     print("[ERROR] Error inesperado al asociar el SG:")
     raise
---------------------------------------------------
+#--------------------------------------------------
 # MANEJO DE LA INSTANCIA RDS (CREAR U OBTENER EXISTENTE)
---------------------------------------------------
+#--------------------------------------------------
 print(f"\n[*] Buscando instancia RDS '{DB_INSTANCE_ID}'...")
 rds_exists = False
 try:
@@ -224,9 +224,9 @@ if not rds_exists:
     rds.get_waiter("db_instance_available").wait(DBInstanceIdentifier=DB_INSTANCE_ID)
     rds_instance = rds.describe_db_instances(DBInstanceIdentifier=DB_INSTANCE_ID)["DBInstances"][0]
     print("[+] Instancia RDS creada y disponible.")
-----------------------------------------------
+#----------------------------------------------
 # CREAR SECURITY GROUP PARA RDS 
-----------------------------------------------
+#----------------------------------------------
 print("\n[*] Iniciando configuración del Security Group específico para RDS...")
 rds_sg_name = SG_RDS_NAME
 try:
@@ -252,9 +252,9 @@ except ClientError as e:
         print(f"[+] Security Group RDS existente: {rds_sg_id}")
     else:
         raise
---------------------------------------------------------------------------------
+#--------------------------------------------------------------------------------
 # Habilitar ingreso al SG de RDS desde el SG de EC2 en el puerto MySQL (3306)
---------------------------------------------------------------------------------
+#--------------------------------------------------------------------------------
 try:
     ec2.authorize_security_group_ingress(
         GroupId=rds_sg_id,
@@ -273,9 +273,9 @@ except ClientError as e:
         print("[*] La regla MySQL ya existe en el SG RDS. Continuando...")
     else:
         raise
----------------------------------------------------------------------
+#---------------------------------------------------------------------
 # Esperar a que la instancia RDS esté disponible antes de modificarla
----------------------------------------------------------------------
+#---------------------------------------------------------------------
 print(f"\n[*] Chequeando disponibilidad de la instancia RDS {DB_INSTANCE_ID}...")
 waiter = rds.get_waiter('db_instance_available')
 try:
@@ -289,15 +289,15 @@ except ClientError as e:
     else:
         print(f"[ERROR] Error inesperado: {e}")
     raise
---------------------------------------------------------------------------------
+#--------------------------------------------------------------------------------
 # Consultar nuevamente la instancia RDS para asegurarse de tener el endpoint actual
---------------------------------------------------------------------------------
+#--------------------------------------------------------------------------------
 rds_instance = rds.describe_db_instances(DBInstanceIdentifier=DB_INSTANCE_ID)["DBInstances"][0]
 endpoint = rds_instance['Endpoint']['Address']
 print(f"[+] Endpoint RDS: {endpoint}")
---------------------------------------------------
+#--------------------------------------------------
 # Asignar el Security Group correspondiente a la instancia RDS
---------------------------------------------------
+#--------------------------------------------------
 print("\n[*] Actualizando la instancia RDS para usar el nuevo Security Group...")
 try:
     rds.modify_db_instance(
@@ -311,9 +311,9 @@ except ClientError as e:
     raise
 
 print(f"\n[+] Instancia RDS {DB_INSTANCE_ID} configurada correctamente.")
--------------------------------------------------------
+#-------------------------------------------------------
 # === CONFIGURAR LA APLICACIÓN EN LA INSTANCIA EC2 ===
--------------------------------------------------------
+#-------------------------------------------------------
 PUBLIC_ZIP_URL = "https://github.com/Diegogar8/Obligatorio-DevOps-2025/releases/download/v1.0/obligatorio-main.zip"
 
 print("\n[*] Iniciando descarga y extracción del archivo ZIP desde GitHub Release...")
@@ -365,9 +365,9 @@ if dl_status != 'Success':
     print('[!] Advertencia: problemas durante la descarga/extracción.')
     if dl_err:
         print(f"    Error: {dl_err}")
--------------------------------------
-# === COMANDOS SSM FINALES ===
--------------------------------------
+#-------------------------------------
+# COMANDOS SSM FINALES
+#-------------------------------------
 print("\n[*] Realizando tareas finales de configuración en EC2...")
 print("    (copiar archivos, generar .env, importar SQL, ajustar permisos y reiniciar)")
 
@@ -416,22 +416,22 @@ if [ -z "$REALDIR" ]; then
   echo "[ERROR] No se encontró ninguna carpeta obligatorio-main* en /home/ssm-user/app"
   exit 2
 fi
------------------------------------
+#-----------------------------------
 # Variables principales del script
------------------------------------
+#-----------------------------------
 EXTRACTED="$REALDIR"
 RDS_ENDPOINT="{endpoint}"
 DB_NAME="{DB_NAME}"
 DB_USER="{DB_USERNAME}"
 DB_PASS="{DB_PASSWORD}"
--------------------------------------------------
+#-------------------------------------------------
 # 1) Verificar y crear los directorios necesarios
--------------------------------------------------
+#-------------------------------------------------
 sudo mkdir -p /var/www
 sudo mkdir -p /var/www/html
--------------------------------------------------------------------------
+#-------------------------------------------------------------------------
 # 2) Copiar y mover el contenido, incluyendo archivos ocultos, si los hay
--------------------------------------------------------------------------
+#-------------------------------------------------------------------------
 if [ -d "$REALDIR" ]; then
     shopt -s dotglob nullglob
     if [ -z "$(ls -A "$REALDIR")" ]; then
@@ -444,23 +444,23 @@ else
     echo "[ERROR] REALDIR ($REALDIR) no existe"
     exit 2
 fi
-----------------------------------------------------------------------------
+#----------------------------------------------------------------------------
 # 3) Proteger init_db.sql moviéndolo fuera del webroot, si el archivo existe
-----------------------------------------------------------------------------
+#----------------------------------------------------------------------------
 if [ -f /var/www/html/init_db.sql ]; then
   sudo mv /var/www/html/init_db.sql /var/www/init_db.sql
 else
   echo "[WARN] init_db.sql no encontrado en /var/www/html"
 fi
------------------------------------------------------------------
+#-----------------------------------------------------------------
 # 4) Eliminar README del directorio web en caso de estar presente
------------------------------------------------------------------
+#-----------------------------------------------------------------
 if [ -f /var/www/html/README.md ]; then
   sudo rm -f /var/www/html/README.md
 fi
-----------------------------------------------------------------
+#----------------------------------------------------------------
 # 5) Crear el archivo .env con datos sensibles de manera segura
-----------------------------------------------------------------
+#----------------------------------------------------------------
 sudo bash -c 'cat > /var/www/.env << "EOF"
 DB_HOST={endpoint}
 DB_NAME={DB_NAME}
@@ -471,9 +471,9 @@ APP_PASS=admin123
 EOF'
 sudo chown apache:apache /var/www/.env || true
 sudo chmod 600 /var/www/.env
--------------------------------------------------
+#-------------------------------------------------
 # 6) Asegurar cliente mysql instalado
--------------------------------------------------
+#-------------------------------------------------
 if ! command -v mysql >/dev/null 2>&1; then
   echo "[INFO] mysql no encontrado, instalando cliente..."
   if command -v dnf >/dev/null 2>&1; then
@@ -488,9 +488,9 @@ if ! command -v mysql >/dev/null 2>&1; then
 else
   echo "[OK] mysql client ya presente"
 fi
-------------------------------------------------------------------------
+#------------------------------------------------------------------------
 # 7) Lanzar el script init_db.sql sobre la base de datos RDS (si existe)
-------------------------------------------------------------------------
+#------------------------------------------------------------------------
 if [ -f /var/www/init_db.sql ]; then
     TMPCNF="/tmp/.mycred.$$"
     cat > "$TMPCNF" <<EOF
@@ -520,21 +520,21 @@ EOF
 else
     echo "[WARN] /var/www/init_db.sql no existe; salto ejecución SQL"
 fi
-------------------------------------------------------------------------
+#------------------------------------------------------------------------
 # 8) Alinear permisos finales de archivos y directorios de la aplicación
-------------------------------------------------------------------------
+#------------------------------------------------------------------------
 sudo chown -R apache:apache /var/www/html || true
-----------------------------
+#----------------------------
 # 9) Reiniciar servicios
-----------------------------
+#----------------------------
 sudo systemctl restart httpd || {{ echo '[ERROR] fallo restart httpd'; systemctl status httpd --no-pager || true; exit 4; }}
 sudo systemctl restart php-fpm || {{ echo '[ERROR] fallo restart php-fpm'; systemctl status php-fpm --no-pager || true; exit 5; }}
 
 echo "[SSM SCRIPT] fin: $(date)"
 """
-----------------------------------------------------------
+#----------------------------------------------------------
 # Lanzar este bloque como un único comando en la terminal
-----------------------------------------------------------
+#----------------------------------------------------------
 status, out, err = send_ssm_and_wait(instance_id, [shell_script], timeout=1200, comment="deploy-full-script")
 
 print(f"\n[Despliegue] Estado SSM: {status}")
@@ -549,9 +549,9 @@ if status != "Success":
     print("[ERROR] Fallo en el despliegue final en EC2.")
 else:
     print("[+] Despliegue completado exitosamente.")
-----------------------------------------------
+#----------------------------------------------
 # Obtener la IP pública de la instancia EC2
-----------------------------------------------
+#----------------------------------------------
 resp = ec2.describe_instances(InstanceIds=[instance_id])
 EC2_public_ip = resp['Reservations'][0]['Instances'][0].get('PublicIpAddress')
 
@@ -573,6 +573,7 @@ else:
     print("\n>>> Página de información de PHP:")
     print(f"    http://{EC2_public_ip}/info.php")
     print("=" * 60)
+
 
 
 
