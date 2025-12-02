@@ -309,6 +309,16 @@ try:
         ApplyImmediately=True
     )
     print(f"[+] SG RDS {rds_sg_name} asociado a la instancia RDS.")
+    
+    # Esperar a que la modificación se aplique completamente
+    print("[*] Esperando a que los cambios de Security Group se propaguen...")
+    time.sleep(30)  # Espera 30 segundos para que los cambios de red se apliquen
+    
+    # Esperar a que RDS vuelva a estar disponible después de la modificación
+    waiter = rds.get_waiter('db_instance_available')
+    waiter.wait(DBInstanceIdentifier=DB_INSTANCE_ID)
+    print("[+] Instancia RDS lista después de la modificación.")
+    
 except ClientError as e:
     print("[ERROR] Error al asociar el SG a la instancia RDS:")
     raise
@@ -576,6 +586,7 @@ else:
     print("\n>>> Página de información de PHP:")
     print(f"    http://{EC2_public_ip}/info.php")
     print("=" * 60)
+
 
 
 
