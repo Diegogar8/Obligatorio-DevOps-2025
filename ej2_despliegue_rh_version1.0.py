@@ -180,7 +180,9 @@ except ClientError as e:
 # MANEJO DE LA INSTANCIA RDS (CREAR U OBTENER EXISTENTE)
 #--------------------------------------------------
 print(f"\n[*] Buscando instancia RDS '{DB_INSTANCE_ID}'...")
+
 rds_exists = False
+
 try:
     resp = rds.describe_db_instances(DBInstanceIdentifier=DB_INSTANCE_ID)
     rds_instance = resp["DBInstances"][0]
@@ -189,8 +191,9 @@ try:
     print("[*] Ingrese la contraseña anterior para continuar:")
     DB_PASS = getpass.getpass().strip()
     DB_PASSWORD = DB_PASS
+
 except ClientError as e:
-    if e.response['Error']['Code'] == 'DBInstanceNotFoundFault':
+    if e.response['Error']['Code'] == 'DBInstanceNotFound':
         print("[*] RDS no existe. Creando nueva instancia...")
     else:
         raise
@@ -573,6 +576,7 @@ else:
     print("\n>>> Página de información de PHP:")
     print(f"    http://{EC2_public_ip}/info.php")
     print("=" * 60)
+
 
 
 
