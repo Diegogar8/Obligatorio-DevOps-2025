@@ -146,13 +146,55 @@ http://X.X.X.X/index.php
 
 ## Ejercicio 1
 
-Prompt 1 – Estructura de sctipt, diseño de opciones con case 
+Prompt 1 - Necesito que diseñes únicamente la estructura del script Bash para crear usuarios a partir de un archivo.
 
-    Genera el estructura del script: 
-    – Instale httpd, php, php-cli, php-fpm, php-common, php-mysqlnd y mariadb105, 
-    – Habilite y arranque httpd y php-fpm, 
-    – Configure la integración Apache + php-fpm 
-    – Cree el archivo /var/www/html/info.php con phpinfo(). 
+Quiero:
+- El esqueleto del script sin lógica interna, solo estructura.
+- Manejo de parámetros usando `case` para:  
+  - `-i` activar modo informativo  
+  - `-c contraseña` asignar contraseña  
+  - archivo obligatorio al final
+- Validación inicial del usuario root (EUID)
+- Variables principales declaradas pero sin lógica
+- Comentarios estructurales indicando dónde iría cada bloque
+
+No generes todavía funciones completas.  
+Solo la arquitectura y el flujo general.
+
+Prompt 2 - Validación de funcionalidad (archivo, formato, useradd, errores)
+
+Quiero que completes la lógica del script Bash basado en la estructura antes generada.
+
+Además necesito agregar ahora TODA la lógica funcional:
+
+- Validación del archivo recibido:
+  - que exista
+  - que sea regular
+  - que tenga permisos de lectura
+- Validación del formato del archivo:
+  - 5 campos separados por `:`
+  - nombre de usuario no vacío
+  - SI/NO para crear home
+  - shell existente
+- Manejo de códigos de error diferenciados
+- Uso de `useradd` con argumentos dinámicos (arrays)
+- Asignación de contraseña con `chpasswd`
+- Evitar crear usuarios que ya existen
+
+La estructura debe quedar completa y funcional.
+
+Prompt 3 - Generación de comentarios finales (versión documentada)
+
+Necesito que agregues comentarios completos y claros al siguiente script Bash, explicando:
+
+- Qué hace cada bloque
+- Qué validaciones se realizan
+- Por qué se usan arrays, case, o useradd de esa forma
+- El propósito de cada código de error
+- El flujo general de procesamiento
+
+Debe quedar como una versión final totalmente comentada y lista para entregar en un obligatorio.
+
 
 ## Ejercicio 2
 
