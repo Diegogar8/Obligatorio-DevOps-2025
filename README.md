@@ -13,6 +13,7 @@ Script para crear múltiples usuarios en Linux desde un archivo de configuració
 - Sistema operativo Linux (desarrollado y probado en Ubuntu 24.04 en WSL)
 - Permisos de root (sudo)
 - Bash shell
+- Git
 
 ## Uso
 
@@ -74,110 +75,57 @@ sudo ./ej1_crea_usuarios.sh -i -c MiPassword123 Usuarios
 
 # Ejercicio 2 - Script de Despliegue de Aplicación de Recursos Humanos
 
-Script que automatiza el despliegue de una aplicación de recursos humanos en AWS.
+Script que automatiza el despliegue completo de una aplicación de recursos humanos en AWS. Crea todos los recursos necesarios (Security Group, RDS, S3, EC2) y despliega la aplicación automáticamente usando AWS Systems Manager (SSM) sin necesidad de SSH.
 
 ## Requisitos
 
-- Python 3.7 o superior (desarrollado y probado en Ubuntu en WSL)
+- Sistema operativo Linux (desarrollado y probado en Ubuntu 24.04 en WSL)
+- Git
+- Python 3.7 o superior
 - boto3
 - Credenciales de AWS configuradas
+- Directorio `obligatorio-main/obligatorio-main` con los archivos de la aplicación
 
-## Instalación
-
-```bash
-pip install boto3
-```
-
-## Configuración
-
-Configurar variables de entorno:
+## Instalación de requerimientos
 
 ```bash
-export RDS_ADMIN_PASSWORD='tu_password_seguro'
-export AWS_ACCESS_KEY_ID='tu_access_key'
-export AWS_SECRET_ACCESS_KEY='tu_secret_key'
+sudo apt update #Descarga la lista de paquetes más reciente
+sudo apt install git #Instala Git
+sudo apt install -y python3-pip #Instala pip para Python 3
+sudo apt install python3-boto3 #Instala boto3 para Python 3
+aws configure #Para configurar la conexión con la CLI de AWS
 ```
-
-Para hacerlo permanente:
+## Ejecutar el script
 
 ```bash
-echo 'export AWS_ACCESS_KEY_ID="tu_access_key_id"' >> ~/.bashrc
-echo 'export AWS_SECRET_ACCESS_KEY="tu_secret_access_key"' >> ~/.bashrc
-echo 'export RDS_ADMIN_PASSWORD="tu_password_seguro"' >> ~/.bashrc
-source ~/.bashrc
+python3 ej2_despliegue_rh.py
 ```
 
-## Permisos IAM
-
-El usuario/rol de AWS debe tener permisos para:
-- EC2: `ec2:CreateSecurityGroup`, `ec2:AuthorizeSecurityGroupIngress`, `ec2:RunInstances`, `ec2:CreateTags`, `ec2:DescribeInstances`, `ec2:ModifyInstanceAttribute`
-- RDS: `rds:CreateDBInstance`, `rds:DescribeDBInstances`, `rds:AddTagsToResource`
-- S3: `s3:CreateBucket`, `s3:PutBucketEncryption`, `s3:PutBucketVersioning`, `s3:PutBucketTagging`, `s3:PutPublicAccessBlock`
-
-## Uso
-
-### Uso básico
+## Se mostrará al finalizar (cómo ejemplo)
 
 ```bash
-python ej2_despliegue_rh.py
+Instancia EC2      : i-0abcd12345
+IP pública EC2     : X.X.X.X
+Instancia RDS      : RDS-Base-De-Datos
+Endpoint RDS       : db-xxxxxxxx.rds.amazonaws.com
+
+>>> URL de la aplicación
+http://X.X.X.X/index.php
 ```
-
-### Con archivo de configuración
-
-```bash
-cp config.example.json config.json
-# Edita config.json
-python ej2_despliegue_rh.py --config config.json
-```
-
-## Archivo de Configuración
-
-El archivo `config.json` permite personalizar:
-
-- **region**: Región de AWS (ej: `us-east-1`)
-- **ami_id**: ID de la AMI para EC2
-- **instance_type**: Tipo de instancia EC2 (ej: `t2.micro`)
-- **db_instance_class**: Clase de instancia RDS (ej: `db.t3.micro`)
-- **db_allocated_storage**: Almacenamiento RDS en GB
-- **app_name**: Nombre de la aplicación
-- **environment**: Ambiente (ej: `production`, `staging`)
 
 ## Recursos Creados
 
-1. **Security Group**: Reglas para HTTPS (443) y SSH (22)
-2. **Bucket S3**: Encriptación AES256, versionado habilitado
-3. **Instancia EC2**: Servidor web con Apache
-4. **Base de Datos RDS**: MySQL 8.0 con encriptación
+1. **Security Group** (`SG-EC2`): Reglas para HTTP (80) y HTTPS (443)
+2. **Security Group para conexión RDS-EC2** (`SG-RDS-RDS-Base-De-Datos`): Reglas para puerto 3306
+3. **Instancia EC2** (`rh-app-web`): Servidor web con Apache, PHP y cliente MySQL
+4. **Instancia RDS** (`rds-base-de-datos`): MySQL 8.0 con encriptación, acceso privado
 
-## Solución de Problemas
 
-**Error: Variables de entorno no definidas**
+## Características de Seguridad
 
-```bash
-export RDS_ADMIN_PASSWORD='tu_password'
-export AWS_ACCESS_KEY_ID='tu_key'
-export AWS_SECRET_ACCESS_KEY='tu_secret'
-```
-
-**Error: "boto3 no está instalado"**
-
-```bash
-python3 -m pip install --user boto3
-```
-
-**Error: "NoCredentialsError" o "Access Denied"**
-
-Verifica que las credenciales de AWS sean correctas y que el usuario IAM tenga los permisos necesarios.
-
-**Error: "AMI not found"**
-
-El AMI puede no estar disponible en tu región. Busca un AMI válido en la consola de AWS y actualiza `config.json`.
-
-## Códigos de Retorno
-
-- `0`: Despliegue exitoso
-- `1`: Error en la configuración o variables de entorno
-- `2`: Error al crear recursos en AWS
+- **RDS privado**: La base de datos no es accesible desde Internet
+- **Despliegue sin SSH**: Usa AWS Systems Manager (SSM) en lugar de claves SSH
+- **Encriptación**: RDS con encriptación en reposo habilitada
 
 ## Estructura del Proyecto
 
@@ -185,15 +133,91 @@ El AMI puede no estar disponible en tu región. Busca un AMI válido en la conso
 .
 ├── ej1_crea_usuarios.sh
 ├── ej2_despliegue_rh.py
-├── config.example.json
-├── requirements.txt
-├── .gitignore
+├── obligatorio-main/
+│   └── obligatorio-main/
+│       ├── *.php, *.html, *.css, *.js  (archivos de la aplicación)
+│       └── init_db.sql                 (script de inicialización de BD)
 ├── README.md
 ├── Usuarios
 └── LICENSE
 ```
 
----
+## Anexo - Prompts utilizados para la confección del código mediante la IA
+
+## Ejercicio 1
+
+Prompt 1 – Estructura de sctipt, diseño de opciones con case 
+
+    Genera el estructura del script: 
+    – Instale httpd, php, php-cli, php-fpm, php-common, php-mysqlnd y mariadb105, 
+    – Habilite y arranque httpd y php-fpm, 
+    – Configure la integración Apache + php-fpm 
+    – Cree el archivo /var/www/html/info.php con phpinfo(). 
+
+## Ejercicio 2
+
+Prompt 1 – User Data para EC2 (Apache + PHP) 
+
+    Genera contendido del user_data para una instancia AWS que haga lo siguiente: 
+    – Instale httpd, php, php-cli, php-fpm, php-common, php-mysqlnd y mariadb105, 
+    – Habilite y arranque httpd y php-fpm, 
+    – Configure la integración Apache + php-fpm 
+    – Cree el archivo /var/www/html/info.php con phpinfo(). 
+
+Prompt 2 – Creación de EC2 y asociación de Security Group 
+
+    “Ayudame a escribir en Python, usando boto3, la parte del script que: 
+    – Cree una instancia EC2 t2.micro con la AMI ami-06b21ccaeff8cd686, 
+    – Use el Instance Profile LabInstanceProfile, 
+    – Asigne el user_data que ya tengo definido, 
+    – Etiquete la instancia con Name = rh-app-web, 
+    – Cree (o reutilice si ya existe) un Security Group llamado SG-EC2 en la VPC por defecto, 
+    – Agregue la regla de entrada HTTP (puerto 80 desde 0.0.0.0/0) y permita salida HTTPS (puerto 443) para que SSM funcione, 
+    – Y asocie ese Security Group nuevo a la instancia sin eliminar los que ya tenga.  
+
+Prompt 3 – Manejo de RDS (existente o nueva) y contraseña 
+
+    “Quiero que el script gestione una instancia RDS MySQL con identificador RDS-Base-De-Datos. 
+    – Si la instancia ya existe, debe detectarlo con describe_db_instances, mostrar su estado y pedirme por consola la contraseña del admin usando getpass. 
+    – Si no existe (capturando la excepción correspondiente), debe pedir la contraseña de admin por consola (validando que no esté vacía y que tenga al menos 8 caracteres), crear una instancia db.t3.micro de 20 GB, no pública, con DB_NAME = demo_db y DB_USERNAME = admin, 
+    – Esperar a que la instancia esté disponible usando el waiter db_instance_available 
+    – Y finalmente obtener el endpoint para usarlo luego en la configuración de la aplicación. 
+
+Prompt 4 – Función auxiliar para ejecutar comandos SSM 
+
+    “Necesito una función en Python que use SSM para ejecutar comandos en la instancia EC2. Llamala send_ssm_and_wait. Debe: 
+    – Recibir el instance_id, una lista de comandos (idealmente un solo string grande con un script bash), un timeout y un comentario; 
+    – Usar ssm.send_command con el documento AWS-RunShellScript; 
+    – Hacer polling con get_command_invocation hasta que el comando termine (Success, Failed, Cancelled o TimedOut); 
+    – Manejar los errores InvocationDoesNotExist y ThrottlingException con reintentos y backoff; 
+    – Devolver una tupla (status, stdout, stderr). 
+    Por favor agregá comentarios en español para explicar cada paso.” 
+
+Prompt 5 – Script bash remoto para desplegar la app PHP 
+ 
+    “Generá el contenido de un script bash (que yo después voy a interpolar como string en Python) que haga lo siguiente en la instancia EC2: 
+    – Detectar la carpeta real descomprimida obligatorio-main* dentro de /home/ssm-user/app, 
+    – Mover el contenido (incluyendo archivos ocultos) al directorio /var/www/html, 
+    – Mover init_db.sql a /var/www/init_db.sql si existe, 
+    – Eliminar README.md de /var/www/html si está, 
+    – Crear un archivo /var/www/.env con las variables DB_HOST, DB_NAME, DB_USER, DB_PASS, APP_USER y APP_PASS, usando valores que yo voy a inyectar desde Python ({endpoint}, {DB_NAME}, {DB_USERNAME}, {DB_PASSWORD}, etc.), 
+    – Asegurarse de que el cliente mysql esté instalado (vía dnf o yum), 
+    – Ejecutar /var/www/init_db.sql contra la base RDS usando un archivo temporal de configuración. 
+    – Ajustar permisos para que apache:apache sea dueño de /var/www/html y que /var/www/.env tenga permisos 600, 
+    – Y al final reiniciar httpd y php-fpm, mostrando errores claros si algún reinicio falla. 
+
+Prompt 6 – Mensajes finales del despliegue 
+ 
+    “Ayudame a definir la salida final del script en Python. 
+    – Debe obtener la IP pública de la instancia EC2 con describe_instances, 
+    – Si no hay IP pública, mostrar un mensaje de error en español indicando que se verifique que la instancia tenga IP pública y esté en estado ‘running’, 
+    – Si la hay, imprimir un bloque formateado que diga ‘DESPLIEGUE FINALIZADO CORRECTAMENTE’ y muestre: 
+        • ID de la instancia EC2, 
+        • IP pública de la EC2, 
+        • Identificador de la instancia RDS, 
+        • Endpoint de RDS, 
+        • URL de la aplicación http://IP/index.php, 
+ 
 
 ## Licencia
 
